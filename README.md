@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/logo.png" alt="logo">
+</p>
+
 # fat_llama
 
 fat_llama is a Python package for upscaling MP3 files to FLAC format using advanced audio processing techniques. It utilizes GPU-accelerated calculations to enhance audio quality by upsampling and adding missing frequencies, resulting in richer and more detailed audio.
@@ -84,3 +88,8 @@ FFT (Fast Fourier Transform) is used to transform the audio signal into the freq
 The report titled "Fast Sparse Fourier Transformations for NMR Spectroscopy" by Badruddin Kamal, supervised by Thomas Huber and Alastair Rendall, 2015, provides a comprehensive understanding of sparse representations and their applications in signal processing. IST leverages the concepts from this report to add missing frequencies and enhance the audio quality by making it more detailed and rich. This is particularly useful in upscaling audio where some frequencies might be missing or congested.
 
 ### Test Audio Source, ericzo - beyond link(https://soundcloud.com/ericzomusic/free-electro-trap-anthem-beyond)
+
+### Run Tests
+```
+python -m unittest discover -s fat_llama/tests
+```
