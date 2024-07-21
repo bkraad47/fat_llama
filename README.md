@@ -29,23 +29,23 @@ Also, requires ffmpeg for windows: https://support.audacityteam.org/basics/insta
 You can run the example provided in example.py:
 
 ```
-from fat_llama.audio_fattener import upscale_mp3_to_flac
+from fat_llama.audio_fattener.feed import upscale_mp3_to_flac
 
 # Example call to the method
 upscale_mp3_to_flac(
-    input_file_path='input_short.mp3',
-    output_file_path_processed='output_processed.flac',
-    max_iterations=400,
-    threshold_value=0.4,
-    gain_factor=22.8,
+    input_file_path='input_test.mp3',
+    output_file_path_processed='output_test.flac',
+    max_iterations=1000,
+    threshold_value=0.6,
+    gain_factor=32.8,
     reduction_profile=[
-        (5, 140, -28.4),
-        (1000, 10000, 26.4),
+        (5, 140, -38.4),
+        (1000, 10000, 36.4),
     ],
     lowcut=5.0,
     highcut=150000.0,
     target_bitrate_kbps=1400,
-    output_file_path_no_processing='output_upscaled_no_processing.flac',
+    output_file_path_no_processing=None,
     use_wiener_filter=False
 )
 ```
