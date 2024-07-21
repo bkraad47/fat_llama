@@ -23,7 +23,8 @@ Install the required packages:
 ```
 pip install -r requirements.txt
 ```
-
+Further need CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
+Also, requires ffmpeg for windows: https://support.audacityteam.org/basics/installing-ffmpeg
 ## Usage
 ### Example Usage
 You can run the example provided in example.py:
