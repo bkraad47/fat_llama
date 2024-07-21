@@ -19,7 +19,7 @@ Clone the repository:
 
 Install:
 ```
-pip install fat_llama-0.1.0
+pip install fat_llama-0.1.2
 ```
 Further need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
 
