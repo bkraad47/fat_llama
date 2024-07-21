@@ -1,4 +1,4 @@
-from fat_llama.audio_fattener import upscale_mp3_to_flac
+from audio_fattener.feed import upscale_mp3_to_flac
 
 # Example call to the method
 upscale_mp3_to_flac(
