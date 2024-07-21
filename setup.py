@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='fat_llama',
-    version='0.1.1',
+    version='0.1.2',
     packages=find_packages(),
     install_requires=[
         'numpy',
@@ -13,18 +13,21 @@ setup(
         'scipy',
         'tqdm',
     ],
+    package_data={
+        # Include any package data files here
+        'fat_llama': ['audio_fattener/*.py', 'tests/*.py'],
+    },
     entry_points={
         'console_scripts': [
             'example=example:main',
         ],
     },
-    github_url='https://github.com/bkraad47/fat_llama',
     author='Badruddin Kamal',
     author_email='bulkguy47@gmail.com',
-    description='A package for CUDA-based upscaling and processing audio files, using FFT to add detail.',
+    description='A package for CUDA-based upscaling and processing audio files, using FFT to add audio frequency details after upscaling.',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
-    url='https://github.com/yourusername/fat_llama',  # Update this with the actual URL of your project
+    url='https://github.com/bkraad47/fat_llama',
     classifiers=[
         'Development Status :: 3 - Alpha',
         'Intended Audience :: Developers',
