@@ -72,18 +72,18 @@ This will upscale the MP3 file specified in the example and produce two FLAC fil
 ## Algorithm Explanation
 The upscaling process involves several steps:
 
-### Reading MP3 File: The MP3 file is read, and the audio samples are extracted along with the sample rate and bitrate.
-### Calculating Upscale Factor: The upscale factor is calculated to achieve the target bitrate.
-### Upscaling Channels: The audio channels are upscaled using an interpolation algorithm. Each sample is repeated multiple times to increase the resolution.
-### Iterative Soft Thresholding (IST): Optional IST is applied to enhance the audio by adding missing frequencies. This process uses FFT to transform the signal into the frequency domain, apply a threshold to keep significant frequencies, and then inverse transform back to the time domain.
-### Scaling Amplitude: The amplitude of the upscaled audio is scaled to match the original.
-### Applying Gain Reduction: Frequency-specific gain reduction is applied based on a given profile.
-### Equalization: A bandpass filter is applied to the audio to equalize it.
-### Optional Wiener Filtering: Wiener filtering is applied to reduce noise if specified.
-### Writing FLAC File: The processed audio is written to a FLAC file.
+1. Reading MP3 File: The MP3 file is read, and the audio samples are extracted along with the sample rate and bitrate.
+2. Calculating Upscale Factor: The upscale factor is calculated to achieve the target bitrate.
+3. Upscaling Channels: The audio channels are upscaled using an interpolation algorithm. Each sample is repeated multiple times to increase the resolution.
+4. Iterative Soft Thresholding (IST): IST is applied to enhance the audio by adding missing frequencies. This process uses FFT to transform the signal into the frequency domain, apply a threshold to keep significant frequencies, and then inverse transform back to the time domain.
+5. Scaling Amplitude: The amplitude of the upscaled audio is scaled to match the original.
+6. Applying Gain Reduction: Frequency-specific gain reduction is applied based on a given profile.
+7. Equalization: A bandpass filter is applied to the audio to equalize it.
+8. Optional Wiener Filtering: Wiener filtering is applied to reduce noise if specified.
+9. Writing FLAC File: The processed audio is written to a FLAC file.
 
 ## Why FFT and IST?
-FFT (Fast Fourier Transform) is used to transform the audio signal into the frequency domain. This allows for the identification and manipulation of specific frequency components. By applying a threshold in the frequency domain, we can keep significant frequencies and discard noise.
+FFT (Fast Fourier Transform) is used to transform the audio signal into the frequency domain. This allows for the identification and manipulation of specific frequency components. By applying a threshold in the frequency domain, we can keep significant frequencies and discard noise and add it to our upscaling data to add detail to upscaling frequencies.
 
 The report titled "Fast Sparse Fourier Transformations for NMR Spectroscopy" by Badruddin Kamal, supervised by Thomas Huber and Alastair Rendall, 2015, provides a comprehensive understanding of sparse representations and their applications in signal processing. IST leverages the concepts from this report to add missing frequencies and enhance the audio quality by making it more detailed and rich. This is particularly useful in upscaling audio where some frequencies might be missing or congested.
 
