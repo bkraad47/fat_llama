@@ -13,17 +13,12 @@ fat_llama is a Python package for upscaling MP3 files to FLAC format using advan
 
 Clone the repository:
 
+Install:
 ```
-sh
-git clone https://github.com/yourusername/fat_llama.git
-cd fat_llama 
+pip install fat_llama-0.1.0
 ```
-Install the required packages:
+Further need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
 
-```
-pip install -r requirements.txt
-```
-Further need CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
 Also, requires ffmpeg for windows: https://support.audacityteam.org/basics/installing-ffmpeg
 ## Usage
 ### Example Usage
