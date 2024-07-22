@@ -1,8 +1,5 @@
-<p align="center">
-  <img src="images/logo.png" alt="logo">
-</p>
-
-# fat_llama
+![Fat Llama Logo](https://drive.google.com/uc?export=view&id=1BHe352g43zAdDYLDusBrBPdNvRIvlQwp)
+# Fat Llama
 
 fat_llama is a Python package for upscaling MP3 files to FLAC format using advanced audio processing techniques. It utilizes GPU-accelerated calculations to enhance audio quality by upsampling and adding missing frequencies, resulting in richer and more detailed audio.
 
@@ -14,11 +11,11 @@ fat_llama is a Python package for upscaling MP3 files to FLAC format using advan
 - Supports GPU-accelerated processing with CuPy.
 
 ## Requirements
-- Cuda 12x capable GPU
+- Cuda capable GPU
 ## Installation
 Install via pip:
 ```
-pip install fat_llama-0.1.3
+pip install fat-llama
 ```
 Note: This version works with cuda 12.
 
@@ -27,21 +24,21 @@ Further need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/ins
 Also, requires ffmpeg for windows: https://support.audacityteam.org/basics/installing-ffmpeg
 
 **Note to install on older versions of cuda and cupy. You will need to download specific version and install locally.**
-cupy version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy
-cupy-cuda11x version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy-cuda11x
+- cupy version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy 
+- cupy-cuda11x version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy-cuda11x
 
 To install locally
 ```
 git clone <target_url>
 cd fat_llama
-pip install.
+pip install .
 ```
 ## Usage
 ### Example Usage
 You can run the example provided in example.py:
 
 ```
-from fat_llama.audio_fattener.feed import upscale_mp3_to_flac
+from fat_llama.audio_fattener.feed import upscale_mp3_to_flac 
 
 # Example call to the method
 upscale_mp3_to_flac(
@@ -62,17 +59,17 @@ upscale_mp3_to_flac(
 )
 ```
 ### Function Parameters
-input_file_path (str): Path to the input MP3 file. Mandatory.
-output_file_path_processed (str): Path to the output processed FLAC file. Mandatory.
-max_iterations (int): Number of iterations for IST. Default is 400.
-threshold_value (float): Threshold value for IST. Default is 0.4.
-gain_factor (float): Gain factor for scaling amplitude. Default is 22.8.
-reduction_profile (list): Profile for gain reduction. Default is [(5, 140, -28.4), (1000, 10000, 26.4)].
-lowcut (float): Low cut frequency for equalizer. Default is 5.0.
-highcut (float): High cut frequency for equalizer. Default is 150000.0.
-target_bitrate_kbps (int): Target bitrate in kbps. Default is 1400.
-output_file_path_no_processing (str): Path to the output upscaled (no processing) FLAC file. Default is None.
-use_wiener_filter (bool): Flag to use Wiener filter. Default is False.
+- `input_file_path (str)`: Path to the input MP3 file. Mandatory.
+- `output_file_path_processed (str)`: Path to the output processed FLAC file. Mandatory.
+- `max_iterations (int)`: Number of iterations for IST. Default is 400.
+- `threshold_value (float)`: Threshold value for IST. Default is 0.4.
+- `gain_factor (float)`: Gain factor for scaling amplitude. Default is 22.8.
+- `reduction_profile (list)`: Profile for gain reduction. Default is [(5, 140, -28.4) #bass , (1000, 10000, 26.4) #treble].
+- `lowcut (float)`: Low cut frequency for equalizer. Default is 5.0.
+- `highcut (float)`: High cut frequency for equalizer. Default is 150000.0.
+- `target_bitrate_kbps (int)`: Target bitrate in kbps. Default is 1400.
+- `output_file_path_no_processing (str)`: Path to the output upscaled (no processing) FLAC file. Default is None.
+- `use_wiener_filter (bool)`: Flag to use Wiener filter. Default is False.
 
 ## Running the Example
 To run the example, execute the following command:
@@ -80,7 +77,8 @@ To run the example, execute the following command:
 python example.py
 ```
 This will upscale the MP3 file specified in the example and produce two FLAC files: one with just upscaling and one with full processing.
-
+## How it works
+![How it Works](https://drive.google.com/uc?export=view&id=1rzIGzghlRUMTrqKSst_FdZk-WhpznVX1)
 ## Algorithm Explanation
 The upscaling process involves several steps:
 

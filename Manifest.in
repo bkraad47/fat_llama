@@ -3,4 +3,3 @@ include LICENSE
 include requirements.txt
 recursive-include fat_llama/tests *
 recursive-include fat_llama/audio_fattener *
-recursive-include images/ *
