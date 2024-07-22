@@ -1,5 +1,5 @@
 numpy
-cupy-cuda12x
+cupy
 pydub
 soundfile
 mutagen

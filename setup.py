@@ -6,7 +6,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         'numpy',
-        'cupy-cuda12x',
+        'cupy',
         'pydub',
         'soundfile',
         'mutagen',
