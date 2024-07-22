@@ -2,11 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='fat_llama',
-<<<<<<< HEAD
     version='0.1.7.1',
-=======
-    version='0.1.6',
->>>>>>> 4886a15 (v-0.1.6 update)
     packages=find_packages(),
     install_requires=[
         'numpy',
