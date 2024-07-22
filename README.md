@@ -15,7 +15,7 @@ fat_llama is a Python package for upscaling MP3 files to FLAC format using advan
 ## Installation
 Install via pip:
 ```
-pip install fat_llama
+pip install fat-llama
 ```
 Note: This version works with cuda 12.
 
@@ -59,17 +59,17 @@ upscale_mp3_to_flac(
 )
 ```
 ### Function Parameters
-input_file_path (str): Path to the input MP3 file. Mandatory.
-output_file_path_processed (str): Path to the output processed FLAC file. Mandatory.
-max_iterations (int): Number of iterations for IST. Default is 400.
-threshold_value (float): Threshold value for IST. Default is 0.4.
-gain_factor (float): Gain factor for scaling amplitude. Default is 22.8.
-reduction_profile (list): Profile for gain reduction. Default is [(5, 140, -28.4), (1000, 10000, 26.4)].
-lowcut (float): Low cut frequency for equalizer. Default is 5.0.
-highcut (float): High cut frequency for equalizer. Default is 150000.0.
-target_bitrate_kbps (int): Target bitrate in kbps. Default is 1400.
-output_file_path_no_processing (str): Path to the output upscaled (no processing) FLAC file. Default is None.
-use_wiener_filter (bool): Flag to use Wiener filter. Default is False.
+- `input_file_path (str)`: Path to the input MP3 file. Mandatory.
+- `output_file_path_processed (str)`: Path to the output processed FLAC file. Mandatory.
+- `max_iterations (int)`: Number of iterations for IST. Default is 400.
+- `threshold_value (float)`: Threshold value for IST. Default is 0.4.
+- `gain_factor (float)`: Gain factor for scaling amplitude. Default is 22.8.
+- `reduction_profile (list)`: Profile for gain reduction. Default is [(5, 140, -28.4) #bass , (1000, 10000, 26.4) #treble].
+- `lowcut (float)`: Low cut frequency for equalizer. Default is 5.0.
+- `highcut (float)`: High cut frequency for equalizer. Default is 150000.0.
+- `target_bitrate_kbps (int)`: Target bitrate in kbps. Default is 1400.
+- `output_file_path_no_processing (str)`: Path to the output upscaled (no processing) FLAC file. Default is None.
+- `use_wiener_filter (bool)`: Flag to use Wiener filter. Default is False.
 
 ## Running the Example
 To run the example, execute the following command:
