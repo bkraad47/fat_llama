@@ -1,4 +1,4 @@
-![Fat Llama Logo](logo.png)
+![Fat Llama Logo](https://drive.google.com/uc?export=view&id=1BHe352g43zAdDYLDusBrBPdNvRIvlQwp)
 # Fat Llama
 
 fat_llama is a Python package for upscaling MP3 files to FLAC format using advanced audio processing techniques. It utilizes GPU-accelerated calculations to enhance audio quality by upsampling and adding missing frequencies, resulting in richer and more detailed audio.
@@ -77,7 +77,8 @@ To run the example, execute the following command:
 python example.py
 ```
 This will upscale the MP3 file specified in the example and produce two FLAC files: one with just upscaling and one with full processing.
-
+## How it works
+![How it Works](https://drive.google.com/uc?export=view&id=1rzIGzghlRUMTrqKSst_FdZk-WhpznVX1)
 ## Algorithm Explanation
 The upscaling process involves several steps:
 

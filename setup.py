@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='fat_llama',
-    version='0.1.6',
+    version='0.1.7',
     packages=find_packages(),
     install_requires=[
         'numpy',
@@ -14,7 +14,6 @@ setup(
         'tqdm',
     ],
     package_data={
-        '': ['*.png'], 
         'fat_llama': ['audio_fattener/*.py', 'tests/*.py'],
     },
     entry_points={
