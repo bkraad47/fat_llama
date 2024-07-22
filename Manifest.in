@@ -1,5 +1,6 @@
 include README.md
 include LICENSE
 include requirements.txt
+include logo.png
 recursive-include fat_llama/tests *
 recursive-include fat_llama/audio_fattener *
