@@ -27,8 +27,8 @@ Further need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/ins
 Also, requires ffmpeg for windows: https://support.audacityteam.org/basics/installing-ffmpeg
 
 **Note to install on older versions of cuda and cupy. You will need to download specific version and install locally.**
-cupy version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy
-cupy-cuda11x version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy-cuda11x
+- cupy version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy
+- cupy-cuda11x version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy-cuda11x
 
 To install locally
 ```
