@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/logo.png" alt="logo">
+  <img src="logo.png" alt="logo">
 </p>
 
 # fat_llama
@@ -14,21 +14,17 @@ fat_llama is a Python package for upscaling MP3 files to FLAC format using advan
 - Supports GPU-accelerated processing with CuPy.
 
 ## Requirements
-- Cuda 12x capable GPU
+- Cuda capable GPU
 ## Installation
 Install via pip:
 ```
-pip install fat_llama-0.1.3
+pip install fat_llama-0.1.4
 ```
 Note: This version works with cuda 12.
 
-Further need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
-
-Also, requires ffmpeg for windows: https://support.audacityteam.org/basics/installing-ffmpeg
-
 **Note to install on older versions of cuda and cupy. You will need to download specific version and install locally.**
-cupy version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy
-cupy-cuda11x version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy-cuda11x
+- cupy version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy
+- cupy-cuda11x version - https://github.com/bkraad47/fat_llama/tree/v-0.1.3---cupy-cuda11x
 
 To install locally
 ```
@@ -36,6 +32,11 @@ git clone <target_url>
 cd fat_llama
 pip install.
 ```
+
+Further if you need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
+
+Also, requires ffmpeg for windows: https://support.audacityteam.org/basics/installing-ffmpeg
+
 ## Usage
 ### Example Usage
 You can run the example provided in example.py:

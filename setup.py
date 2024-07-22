@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='fat_llama',
-    version='0.1.3',
+    version='0.1.4',
     packages=find_packages(),
     install_requires=[
         'numpy',
@@ -14,7 +14,7 @@ setup(
         'tqdm',
     ],
     package_data={
-        # Include any package data files here
+        '': ['*.png'],  # Include the logo.png file
         'fat_llama': ['audio_fattener/*.py', 'tests/*.py'],
     },
     entry_points={
@@ -22,7 +22,7 @@ setup(
             'example=example:main',
         ],
     },
-    author='Badruddin Kamal',
+    author='RaAd',
     author_email='bulkguy47@gmail.com',
     description='fat_llama is a Python package for upscaling MP3 files to FLAC format using advanced audio processing techniques. It utilizes GPU-accelerated calculations to enhance audio quality by upsampling and adding missing frequencies, resulting in richer and more detailed audio experiences.',
     long_description=open('README.md').read(),
