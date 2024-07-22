@@ -1,8 +1,5 @@
-<p align="center">
-  <img src="images/logo.png" alt="logo">
-</p>
-
-# fat_llama
+![Fat Llama Logo](logo.png)
+# Fat Llama
 
 fat_llama is a Python package for upscaling MP3 files to FLAC format using advanced audio processing techniques. It utilizes GPU-accelerated calculations to enhance audio quality by upsampling and adding missing frequencies, resulting in richer and more detailed audio.
 
@@ -14,11 +11,11 @@ fat_llama is a Python package for upscaling MP3 files to FLAC format using advan
 - Supports GPU-accelerated processing with CuPy.
 
 ## Requirements
-- Cuda 12x capable GPU
+- Cuda capable GPU
 ## Installation
 Install via pip:
 ```
-pip install fat_llama-0.1.3
+pip install fat_llama
 ```
 Note: This version works with cuda 12.
 
@@ -34,14 +31,14 @@ To install locally
 ```
 git clone <target_url>
 cd fat_llama
-pip install.
+pip install .
 ```
 ## Usage
 ### Example Usage
 You can run the example provided in example.py:
 
 ```
-from fat_llama.audio_fattener.feed import upscale_mp3_to_flac
+from fat_llama.audio_fattener.feed import upscale_mp3_to_flac 
 
 # Example call to the method
 upscale_mp3_to_flac(
