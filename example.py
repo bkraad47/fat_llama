@@ -8,7 +8,7 @@ upscale_mp3_to_flac(
     threshold_value=0.6,
     gain_factor=32.8,
     reduction_profile=[
-        (5, 140, -38.4),
+        (5, 140, -22.4),
         (1000, 10000, 36.4),
     ],
     lowcut=5.0,
