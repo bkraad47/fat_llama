@@ -11,6 +11,12 @@ jobs:
 
       - name: Setup Python
         uses: actions/setup-python@v4
+
+      - name: Update packages
+        run: apt install ffmpeg
+
+      - name: Install ffmpeg
+        run: pip install -r requirements.txt
       
       - name: Install Dependencies
         run: pip install -r requirements.txt
