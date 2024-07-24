@@ -31,11 +31,14 @@ jobs:
       with:
         cuda: '12.5.0'
 
-    - run: echo "Installed CUDA version is: ${{steps.cuda-toolkit.outputs.cuda}}"
+    - name: Display CUDA version
+      run: echo "Installed CUDA version is: ${{ steps.cuda-toolkit.outputs.cuda }}"
 
-    - run: echo "CUDA install location: ${{steps.cuda-toolkit.outputs.CUDA_PATH}}"
+    - name: Display CUDA install location
+      run: echo "CUDA install location: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
 
-    - run: nvcc -V
+    - name: Verify CUDA installation
+      run: nvcc -V
 
     - name: Install Python dependencies
       run: |
