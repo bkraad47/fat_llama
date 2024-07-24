@@ -1,11 +1,11 @@
-name: Python package
+name: build
 
 on: [push, pull_request]
 
 jobs:
   build:
 
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     strategy:
       matrix:
@@ -20,6 +20,13 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
+    - name: Clean up to free space
+      run: |
+        sudo apt-get clean
+        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
+        sudo apt-get autoremove -y
+        df -h
+
     - name: Install system dependencies
       run: |
         sudo apt-get update
@@ -31,7 +38,7 @@ jobs:
       with:
         cuda: '12.5.0'
         method: 'network'
-        sub-packages: '["nvcc", "cudart", "cufft"]'
+        sub-packages: '["nvss", "cudart"]'
 
     - name: Install Python dependencies
       run: |
