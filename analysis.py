@@ -19,19 +19,26 @@ def read_flac(file_path):
         data = data.mean(axis=1)  # Convert to mono if stereo
     return data, sample_rate
 
-def compare_signals(signal2, signal1):
-    min_len = min(len(signal2), len(signal1))
-    signal2 = signal2[:min_len]
-    signal1 = signal1[:min_len]
+def normalize(signal):
+    return signal / np.max(np.abs(signal))
+
+def compare_signals(mp3, flac):
+    # Normalize signals
+    mp3 = normalize(mp3)
+    flac = normalize(flac)
+    
+    min_len = min(len(mp3), len(flac))
+    mp3 = mp3[:min_len]
+    flac = flac[:min_len]
     time = np.arange(min_len)
 
-    print(f"Signal 2 (first 10 samples): {signal2[:10]}")
-    print(f"Signal 1 (first 10 samples): {signal1[:10]}")
+    print(f"MP3 (first 10 samples): {mp3[:10]}")
+    print(f"FLAC (first 10 samples): {flac[:10]}")
     
     # 1. Waveform Comparison
     plt.figure(figsize=(14, 7))
-    plt.plot(time, signal2, label='Signal 2')
-    plt.plot(time, signal1, label='Signal 1')
+    plt.plot(time, mp3, label='MP3')
+    plt.plot(time, flac, label='FLAC')
     plt.legend()
     plt.xlabel('Time')
     plt.ylabel('Amplitude')
@@ -39,7 +46,7 @@ def compare_signals(signal2, signal1):
     plt.show()
 
     # 2. Difference Signal
-    difference_signal = signal2 - signal1
+    difference_signal = mp3 - flac
     plt.figure(figsize=(14, 7))
     plt.plot(time, difference_signal, label='Difference Signal')
     plt.legend()
@@ -49,53 +56,53 @@ def compare_signals(signal2, signal1):
     plt.show()
 
     # 3. Mean Squared Error (MSE)
-    mse = np.mean((signal2 - signal1) ** 2)
+    mse = np.mean((mp3 - flac) ** 2)
     print(f"Mean Squared Error: {mse}")
 
     # 4. Spectrogram Comparison
-    f1, t1, Sxx1 = signal.spectrogram(signal2)
-    f2, t2, Sxx2 = signal.spectrogram(signal1)
+    f1, t1, Sxx1 = signal.spectrogram(mp3)
+    f2, t2, Sxx2 = signal.spectrogram(flac)
 
     plt.figure(figsize=(14, 7))
     plt.subplot(2, 1, 1)
     plt.pcolormesh(t1, f1, 10 * np.log10(Sxx1))
-    plt.title('Spectrogram of Signal 2')
+    plt.title('Spectrogram of MP3')
     plt.ylabel('Frequency [Hz]')
     plt.xlabel('Time [sec]')
 
     plt.subplot(2, 1, 2)
     plt.pcolormesh(t2, f2, 10 * np.log10(Sxx2))
-    plt.title('Spectrogram of Signal 1')
+    plt.title('Spectrogram of FLAC')
     plt.ylabel('Frequency [Hz]')
     plt.xlabel('Time [sec]')
     plt.tight_layout()
     plt.show()
 
     # 5. Cross-Correlation using GPU
-    signal2_gpu = cp.asarray(signal2)
-    signal1_gpu = cp.asarray(signal1)
+    mp3_gpu = cp.asarray(mp3)
+    flac_gpu = cp.asarray(flac)
 
-    correlation_gpu = cp.correlate(signal2_gpu, signal1_gpu, mode='full')
+    correlation_gpu = cp.correlate(mp3_gpu, flac_gpu, mode='full')
     correlation = cp.asnumpy(correlation_gpu)
-    lags = np.arange(-len(signal2) + 1, len(signal1))
+    lags = np.arange(-len(mp3) + 1, len(flac))
 
     plt.figure(figsize=(14, 7))
     plt.plot(lags, correlation)
     plt.xlabel('Lag')
     plt.ylabel('Cross-correlation')
-    plt.title('Cross-correlation between Signal 2 and Signal 1')
+    plt.title('Cross-correlation between MP3 and FLAC')
     plt.show()
 
     # 6. Frequency Domain Analysis using cuFFT
-    freq2 = cp.fft.fft(signal2_gpu)
-    freq1 = cp.fft.fft(signal1_gpu)
+    freq_mp3 = cp.fft.fft(mp3_gpu)
+    freq_flac = cp.fft.fft(flac_gpu)
 
-    freq2 = cp.asnumpy(freq2)
-    freq1 = cp.asnumpy(freq1)
+    freq_mp3 = cp.asnumpy(freq_mp3)
+    freq_flac = cp.asnumpy(freq_flac)
 
     plt.figure(figsize=(14, 7))
-    plt.plot(np.abs(freq2), label='Frequency Content of Signal 2')
-    plt.plot(np.abs(freq1), label='Frequency Content of Signal 1')
+    plt.plot(np.abs(freq_mp3), label='Frequency Content of MP3')
+    plt.plot(np.abs(freq_flac), label='Frequency Content of FLAC')
     plt.legend()
     plt.xlabel('Frequency Bin')
     plt.ylabel('Magnitude')
@@ -107,16 +114,16 @@ if __name__ == "__main__":
     mp3_file_path = 'input_test.mp3'
     flac_file_path = 'output_test.flac'
 
-    signal1, sample_rate1 = read_mp3(mp3_file_path)
-    signal2, sample_rate2 = read_flac(flac_file_path)
+    mp3, sample_rate_mp3 = read_mp3(mp3_file_path)
+    flac, sample_rate_flac = read_flac(flac_file_path)
 
     # Resample if necessary to match sample rates
-    if sample_rate1 != sample_rate2:
+    if sample_rate_mp3 != sample_rate_flac:
         from scipy.signal import resample
 
-        if len(signal1) > len(signal2):
-            signal2 = resample(signal2, len(signal1))
+        if len(mp3) > len(flac):
+            flac = resample(flac, len(mp3))
         else:
-            signal1 = resample(signal1, len(signal2))
+            mp3 = resample(mp3, len(flac))
 
-    compare_signals(signal2, signal1)
+    compare_signals(mp3, flac)

@@ -8,5 +8,5 @@ upscale(
     target_format='flac',
     max_iterations=1000,
     threshold_value=0.6,
-    target_bitrate_kbps=1411
+    target_bitrate_kbps=1400
 )
