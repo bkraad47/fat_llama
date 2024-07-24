@@ -146,7 +146,7 @@ def normalize_signal(signal):
     """
     return signal / np.max(np.abs(signal))
 
-def scale_amplitude(original, upscaled, gain_factor):
+def scale_amplitude_func(original, upscaled, gain_factor):
     """ 
     Scale the amplitude of the upscaled channels to match the original and apply gain factor 
     
@@ -221,7 +221,23 @@ def apply_wiener_filter(data):
     """
     return wiener(data)
 
-def upscale_mp3_to_flac(input_file_path, output_file_path_processed, max_iterations=400, threshold_value=0.4, gain_factor=22.8, reduction_profile=None, lowcut=5.0, highcut=150000.0, target_bitrate_kbps=1400, output_file_path_no_processing=None, use_wiener_filter=False):
+def upscale_mp3_to_flac(
+        input_file_path,
+        output_file_path_processed,
+        max_iterations=400,
+        threshold_value=0.4,
+        gain_factor=22.8,
+        reduction_profile=None,
+        lowcut=5.0,
+        highcut=150000.0,
+        target_bitrate_kbps=1400,
+        output_file_path_no_processing=None,
+        toggle_wiener_filter=False,
+        toggle_normalize=True,       # Toggle normalization
+        toggle_equalize=True,        # Toggle equalization
+        toggle_scale_amplitude=True, # Toggle amplitude scaling
+        toggle_gain_reduction=True   # Toggle gain reduction
+    ):
     """
     Main function to upscale an MP3 file to FLAC format with optional processing.
     
@@ -236,7 +252,11 @@ def upscale_mp3_to_flac(input_file_path, output_file_path_processed, max_iterati
     highcut (float): High cut frequency for equalizer.
     target_bitrate_kbps (int): Target bitrate in kbps (must be between 800 and 1400).
     output_file_path_no_processing (str, optional): Path to the output FLAC file without processing. Default is None.
-    use_wiener_filter (bool): Flag to use Wiener filter or not. Default is False.
+    toggle_wiener_filter (bool): Flag to use Wiener filter. Default is False.
+    toggle_normalize (bool): Flag to normalize audio. Default is True.
+    toggle_equalize (bool): Flag to equalize audio. Default is True.
+    toggle_scale_amplitude (bool): Flag to scale amplitude of the audio. Default is True.
+    toggle_gain_reduction (bool): Flag to apply gain reduction. Default is True.
     """
     if reduction_profile is None:
         reduction_profile = [
@@ -268,37 +288,71 @@ def upscale_mp3_to_flac(input_file_path, output_file_path_processed, max_iterati
 
     if output_file_path_no_processing is not None:
         logger.info("Upscaling channels without processing...")
-        upscaled_channels_no_processing = upscale_channels(channels, upscale_factor=upscale_factor, max_iter=max_iterations, threshold=threshold_value, apply_ist=False)
+        upscaled_channels_no_processing = upscale_channels(
+            channels,
+            upscale_factor=upscale_factor,
+            max_iter=max_iterations,
+            threshold=threshold_value,
+            apply_ist=False
+        )
         new_sample_rate = sample_rate * upscale_factor
         write_flac(output_file_path_no_processing, new_sample_rate, upscaled_channels_no_processing)
         logger.info(f"Saved upscaled (no processing) FLAC file at {output_file_path_no_processing}")
 
     logger.info("Upscaling and processing channels...")
-    upscaled_channels = upscale_channels(channels, upscale_factor=upscale_factor, max_iter=max_iterations, threshold=threshold_value, apply_ist=True)
+    upscaled_channels = upscale_channels(
+        channels,
+        upscale_factor=upscale_factor,
+        max_iter=max_iterations,
+        threshold=threshold_value,
+        apply_ist=True
+    )
     
-    logger.info("Scaling amplitudes...")
-    scaled_upscaled_channels = []
-    for i, channel in enumerate(channels.T):
-        scaled_channel = scale_amplitude(channel, upscaled_channels[:, i], gain_factor=gain_factor)
-        scaled_upscaled_channels.append(scaled_channel)
-    scaled_upscaled_channels = np.column_stack(scaled_upscaled_channels)
+    if toggle_scale_amplitude:
+        logger.info("Scaling amplitudes...")
+        scaled_upscaled_channels = []
+        for i, channel in enumerate(channels.T):
+            scaled_channel = scale_amplitude_func(channel, upscaled_channels[:, i], gain_factor=gain_factor)
+            scaled_upscaled_channels.append(scaled_channel)
+        scaled_upscaled_channels = np.column_stack(scaled_upscaled_channels)
+    else:
+        logger.info("Auto-scaling amplitudes based on original MP3...")
+        scaled_upscaled_channels = []
+        for i, channel in enumerate(channels.T):
+            # Auto-scale the amplitude based on the original MP3
+            scaled_channel = normalize_signal(upscaled_channels[:, i]) * np.max(np.abs(channel))
+            scaled_upscaled_channels.append(scaled_channel)
+        scaled_upscaled_channels = np.column_stack(scaled_upscaled_channels)
 
-    logger.info("Applying gain reduction...")
-    gain_reduced_channels = []
-    for i in range(scaled_upscaled_channels.shape[1]):
-        gain_reduced_channel = apply_gain_reduction(cp.asarray(scaled_upscaled_channels[:, i]), sample_rate * upscale_factor, reduction_profile)
-        gain_reduced_channels.append(cp.asnumpy(gain_reduced_channel))
-    gain_reduced_channels = np.column_stack(gain_reduced_channels)
+    if toggle_gain_reduction:
+        logger.info("Applying gain reduction...")
+        gain_reduced_channels = []
+        for i in range(scaled_upscaled_channels.shape[1]):
+            gain_reduced_channel = apply_gain_reduction(cp.asarray(scaled_upscaled_channels[:, i]), sample_rate * upscale_factor, reduction_profile)
+            gain_reduced_channels.append(cp.asnumpy(gain_reduced_channel))
+        gain_reduced_channels = np.column_stack(gain_reduced_channels)
+    else:
+        gain_reduced_channels = scaled_upscaled_channels
 
-    logger.info("Normalizing and equalizing...")
-    normalized_upscaled_channels = []
-    for i in range(gain_reduced_channels.shape[1]):
-        normalized_channel = normalize_signal(gain_reduced_channels[:, i])
-        equalized_channel = equalize_audio(normalized_channel, sample_rate * upscale_factor, lowcut, highcut)
-        if use_wiener_filter:
-            equalized_channel = apply_wiener_filter(equalized_channel)
-        normalized_upscaled_channels.append(equalized_channel)
-    normalized_upscaled_channels = np.column_stack(normalized_upscaled_channels)
+    if toggle_normalize:
+        logger.info("Normalizing audio...")
+        normalized_upscaled_channels = []
+        for i in range(gain_reduced_channels.shape[1]):
+            normalized_channel = normalize_signal(gain_reduced_channels[:, i])
+            normalized_upscaled_channels.append(normalized_channel)
+        normalized_upscaled_channels = np.column_stack(normalized_upscaled_channels)
+    else:
+        normalized_upscaled_channels = gain_reduced_channels
+
+    if toggle_equalize:
+        logger.info("Equalizing audio...")
+        equalized_upscaled_channels = []
+        for i in range(normalized_upscaled_channels.shape[1]):
+            equalized_channel = equalize_audio(normalized_upscaled_channels[:, i], sample_rate * upscale_factor, lowcut, highcut)
+            if toggle_wiener_filter:
+                equalized_channel = apply_wiener_filter(equalized_channel)
+            equalized_upscaled_channels.append(equalized_channel)
+        normalized_upscaled_channels = np.column_stack(equalized_upscaled_channels)
 
     new_sample_rate = sample_rate * upscale_factor
     write_flac(output_file_path_processed, new_sample_rate, normalized_upscaled_channels)
