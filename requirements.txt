@@ -4,4 +4,4 @@ pydub
 soundfile
 mutagen
 scipy
-tqdm
+logging
