@@ -26,7 +26,7 @@ Note: This version works with CUDA 12.
 
 Further need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
 
-Also, requires ffmpeg for windows: https://support.audacityteam.org/basics/installing-ffmpeg
+Also, requires ffmpeg: https://support.audacityteam.org/basics/installing-ffmpeg
 
 **Note to install on older versions of CUDA and CuPy. You will need to download specific versions and install locally.**
 
