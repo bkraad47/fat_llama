@@ -46,7 +46,7 @@ pip install .
 You can run the example provided in example.py:
 
 ```
-from fat_llama.audio_fattener.feed import upscale_mp3_to_flac 
+from fat_llama.audio_fattener.feed import upscale
 
 # Example call to the method
 upscale(
