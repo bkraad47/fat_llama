@@ -22,7 +22,7 @@ def read_flac(file_path):
 def normalize(signal):
     return signal / np.max(np.abs(signal))
 
-def compare_signals(mp3, flac):
+def compare_signals(mp3, flac, sample_rate):
     # Normalize signals
     mp3 = normalize(mp3)
     flac = normalize(flac)
@@ -30,7 +30,7 @@ def compare_signals(mp3, flac):
     min_len = min(len(mp3), len(flac))
     mp3 = mp3[:min_len]
     flac = flac[:min_len]
-    time = np.arange(min_len)
+    time = np.arange(min_len) / sample_rate
 
     print(f"MP3 (first 10 samples): {mp3[:10]}")
     print(f"FLAC (first 10 samples): {flac[:10]}")
@@ -40,7 +40,7 @@ def compare_signals(mp3, flac):
     plt.plot(time, mp3, label='MP3')
     plt.plot(time, flac, label='FLAC')
     plt.legend()
-    plt.xlabel('Time')
+    plt.xlabel('Time (s)')
     plt.ylabel('Amplitude')
     plt.title('Waveform Comparison')
     plt.show()
@@ -50,7 +50,7 @@ def compare_signals(mp3, flac):
     plt.figure(figsize=(14, 7))
     plt.plot(time, difference_signal, label='Difference Signal')
     plt.legend()
-    plt.xlabel('Time')
+    plt.xlabel('Time (s)')
     plt.ylabel('Amplitude')
     plt.title('Difference Signal')
     plt.show()
@@ -60,21 +60,28 @@ def compare_signals(mp3, flac):
     print(f"Mean Squared Error: {mse}")
 
     # 4. Spectrogram Comparison
-    f1, t1, Sxx1 = signal.spectrogram(mp3)
-    f2, t2, Sxx2 = signal.spectrogram(flac)
+    nperseg = 2048
+    f1, t1, Sxx1 = signal.spectrogram(mp3, fs=sample_rate, nperseg=nperseg)
+    f2, t2, Sxx2 = signal.spectrogram(flac, fs=sample_rate, nperseg=nperseg)
 
     plt.figure(figsize=(14, 7))
     plt.subplot(2, 1, 1)
-    plt.pcolormesh(t1, f1, 10 * np.log10(Sxx1))
+    plt.pcolormesh(t1, f1, 10 * np.log10(Sxx1), vmin=-120, vmax=0)
     plt.title('Spectrogram of MP3')
-    plt.ylabel('Frequency [Hz]')
-    plt.xlabel('Time [sec]')
+    plt.ylabel('Frequency (Hz)')
+    plt.xlabel('Time (s)')
+    plt.colorbar(label='SNR (dB)')
+    plt.yscale('log')
+    plt.ylim(20, 25000)
 
     plt.subplot(2, 1, 2)
-    plt.pcolormesh(t2, f2, 10 * np.log10(Sxx2))
+    plt.pcolormesh(t2, f2, 10 * np.log10(Sxx2), vmin=-120, vmax=0)
     plt.title('Spectrogram of FLAC')
-    plt.ylabel('Frequency [Hz]')
-    plt.xlabel('Time [sec]')
+    plt.ylabel('Frequency (Hz)')
+    plt.xlabel('Time (s)')
+    plt.colorbar(label='SNR (dB)')
+    plt.yscale('log')
+    plt.ylim(20, 25000)
     plt.tight_layout()
     plt.show()
 
@@ -126,4 +133,5 @@ if __name__ == "__main__":
         else:
             mp3 = resample(mp3, len(flac))
 
-    compare_signals(mp3, flac)
+    sample_rate = sample_rate_mp3  # Assuming both are the same after resampling
+    compare_signals(mp3, flac, sample_rate)
