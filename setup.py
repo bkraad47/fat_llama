@@ -11,7 +11,6 @@ setup(
         'soundfile',
         'mutagen',
         'scipy',
-        'logging',
     ],
     package_data={
         'fat_llama': ['audio_fattener/*.py', 'tests/*.py'],

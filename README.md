@@ -114,6 +114,12 @@ All notable changes to this project will be documented in this file.
 
 #### Changed
 
+- Remove `logging` from requirements to fix pip bug.
+
+### [1.0.1] - 2024-07-26
+
+#### Changed
+
 - Updated `analytics.py` analysis and spectorgram results.
 - Updated `README.md` details.
 
