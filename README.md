@@ -110,7 +110,7 @@ ericzo - beyond link(https://soundcloud.com/ericzomusic/free-electro-trap-anthem
 
 All notable changes to this project will be documented in this file.
 
-### [1.0.1] - 2024-07-26
+### [1.0.2] - 2024-07-26
 
 #### Changed
 
