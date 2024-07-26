@@ -26,9 +26,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 .github
-.github/*
-.github/workflows/
-.github/workflows/*
+
+# Don't ignore .github/workflows
+!.github/
+!.github/workflows/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

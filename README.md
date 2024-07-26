@@ -78,7 +78,7 @@ This will upscale the MP3 file specified in the example and produce a FLAC file 
 
 ## Spectrogram Results
 
-![Spectrogram Results](https://drive.google.com/uc?export=view&id=1Y-NHkwrSfrVexH1yYtzxcLOWQuLdvScL)
+![Spectrogram Results](https://drive.google.com/uc?export=view&id=1_QgMQ8FR1Rryyw22bBQa0EAEGIjw9eS_)
 
 ## How it works
 
@@ -106,15 +106,16 @@ The report titled "Fast Sparse Fourier Transformations for NMR Spectroscopy" by 
 
 ericzo - beyond link(https://soundcloud.com/ericzomusic/free-electro-trap-anthem-beyond)
 
-## Run Tests
-
-Clone the repository and install the requirements. Test the packaged files:
-```
-python -m unittest discover -s fat_llama/tests
-```
 ## Changelog
 
 All notable changes to this project will be documented in this file.
+
+### [1.0.1] - 2024-07-26
+
+#### Changed
+
+- Updated `analytics.py` analysis and spectorgram results.
+- Updated `README.md` details.
 
 ### [1.0.0] - 2024-07-25
 
