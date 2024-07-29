@@ -6,8 +6,8 @@ fat_llama is a Python package for upscaling audio files to FLAC or WAV formats u
 ## Features
 
 - Upscale MP3 files to high-quality FLAC format.
-- Optional iterative soft thresholding (IST) for enhanced audio processing.
-- Gain adjustment, equalization, and optional Wiener filtering.
+- Iterative soft thresholding (IST) for enhanced audio processing.
+- Auto-scaling amplitude adjustment and normalization.
 - Supports GPU-accelerated processing with CuPy.
 
 ## Requirements
