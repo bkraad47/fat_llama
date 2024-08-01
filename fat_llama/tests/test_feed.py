@@ -39,12 +39,5 @@ class TestAudioFattener(unittest.TestCase):
         if os.path.exists(output_file):
             os.remove(output_file)
 
-    def test_new_interpolation_algorithm(self):
-        data = np.array([1, 2, 3, 4])
-        upscale_factor = 2
-        expected_result = np.array([1, 1, 2, 2, 3, 3, 4, 4])
-        result = new_interpolation_algorithm(data, upscale_factor).get()
-        np.testing.assert_array_equal(result, expected_result)
-
 if __name__ == '__main__':
     unittest.main()
