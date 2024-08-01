@@ -6,7 +6,11 @@ upscale(
     output_file_path='output_test.flac',
     source_format='mp3',
     target_format='flac',
-    max_iterations=1000,
+    max_iterations=300,
     threshold_value=0.6,
-    target_bitrate_kbps=1400
+    target_bitrate_kbps=1400,
+    toggle_normalize=True,
+    toggle_autoscale=True,
+    toggle_adaptive_filter=True
+
 )
