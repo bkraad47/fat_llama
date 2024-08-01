@@ -55,9 +55,12 @@ upscale(
     output_file_path='output_test.flac',
     source_format='mp3',
     target_format='flac',
-    max_iterations=1000,
+    max_iterations=300,
     threshold_value=0.6,
-    target_bitrate_kbps=1400
+    target_bitrate_kbps=1400,
+    toggle_normalize=True,
+    toggle_autoscale=True,
+    toggle_adaptive_filter=True
 )
 ```
 ### Function Parameters
@@ -69,6 +72,8 @@ upscale(
 - `max_iterations (int)`: Maximum number of iterations for IST. Default is 800.
 - `threshold_value (float)`: Threshold value for IST. Default is 0.6.
 - `target_bitrate_kbps (int)`: Target bitrate in kbps. Default is 1411.
+- `toggle_normalize (bool)`: Whether to normalize the audio. Default True.
+- `toggle_autoscale (bool)`: Whether to autoscale the audio based on the original audio. Default True.
 
 ## Running the Example
 
@@ -80,7 +85,7 @@ This will upscale the MP3 file specified in the example and produce a FLAC file 
 
 ## Spectrogram Results
 
-![Spectrogram Results](https://drive.google.com/uc?export=view&id=1_QgMQ8FR1Rryyw22bBQa0EAEGIjw9eS_)
+![Spectrogram Results](https://drive.google.com/uc?export=view&id=1uk_QVOm2M3jqtU66toFEuJ3iysFSzFw6)
 
 ## How it works
 
@@ -111,6 +116,15 @@ ericzo - beyond link(https://soundcloud.com/ericzomusic/free-electro-trap-anthem
 ## Changelog
 
 All notable changes to this project will be documented in this file.
+
+### [1.1.0] - 2024-08-01
+
+#### Chanaged
+
+- Moved adaptive filtering to after normalization and auto-scaling steps.
+- Reduced step size for LMS adaptive filter for improved stability.
+- Ensured all processing uses CuPy for GPU acceleration.
+- Added detailed comments and logging for better traceability.
 
 ### [1.0.2] - 2024-07-26
 
