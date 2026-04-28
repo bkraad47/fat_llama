@@ -5,10 +5,13 @@ fat_llama is a Python package for upscaling audio files to FLAC or WAV formats u
 
 ## Features
 
-- Upscale MP3 files to high-quality FLAC format.
-- Iterative soft thresholding (IST) for enhanced audio processing.
+- Upscale MP3/OGG/WAV/FLAC files to high-quality FLAC or WAV.
+- Bandlimited FFT (sinc) interpolation — no spectral imaging artifacts.
+- Iterative soft thresholding (IST) for enhanced spectral reconstruction.
+- GPU-accelerated LMS adaptive filtering via a block-parallel CUDA kernel.
 - Auto-scaling amplitude adjustment and normalization.
-- Supports GPU-accelerated processing with CuPy.
+- ML-based bandwidth extension via [AudioSR](https://github.com/haoheliu/versatile_audio_super_resolution) to synthesize content above the source codec's lowpass (e.g. >16 kHz for MP3).
+- GPU-accelerated processing with CuPy.
 
 ## Requirements
 
@@ -27,6 +30,12 @@ Note: This version works with CUDA 12.
 Further need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
 
 Also, requires ffmpeg: https://support.audacityteam.org/basics/installing-ffmpeg
+
+### AudioSR (ML-based super-resolution)
+
+`audiosr` and `torch` are installed automatically as dependencies. The first
+time `toggle_audiosr=True` is used, AudioSR downloads its model weights
+(a few hundred MB) on demand.
 
 **Note to install on older versions of CUDA and CuPy. You will need to download specific versions and install locally.**
 
@@ -49,18 +58,24 @@ You can run the example provided in example.py:
 ```
 from fat_llama.audio_fattener.feed import upscale
 
-# Example call to the method
 upscale(
     input_file_path='input_test.mp3',
     output_file_path='output_test.flac',
     source_format='mp3',
     target_format='flac',
-    max_iterations=300,
+    max_iterations=100,
     threshold_value=0.6,
     target_bitrate_kbps=1400,
     toggle_normalize=True,
     toggle_autoscale=True,
-    toggle_adaptive_filter=True
+    toggle_adaptive_filter=True,
+
+    toggle_audiosr=False,
+    audiosr_model='basic',
+    audiosr_ddim_steps=50,
+    audiosr_guidance_scale=3.5,
+    audiosr_seed=42,
+    audiosr_device=None,
 )
 ```
 ### Function Parameters
@@ -69,11 +84,18 @@ upscale(
 - `output_file_path (str)`: Path to the output processed audio file. Mandatory.
 - `source_format (str)`: Format of the input audio file (e.g., 'mp3', 'wav', 'ogg', 'flac').
 - `target_format (str)`: Format of the output audio file (e.g., 'flac', 'wav'). Default is 'flac'.
-- `max_iterations (int)`: Maximum number of iterations for IST. Default is 800.
+- `max_iterations (int)`: Maximum number of iterations for IST. Default is 300.
 - `threshold_value (float)`: Threshold value for IST. Default is 0.6.
 - `target_bitrate_kbps (int)`: Target bitrate in kbps. Default is 1411.
 - `toggle_normalize (bool)`: Whether to normalize the audio. Default True.
 - `toggle_autoscale (bool)`: Whether to autoscale the audio based on the original audio. Default True.
+- `toggle_adaptive_filter (bool)`: Apply LMS adaptive filtering (block-parallel CUDA kernel). Default True.
+- `toggle_audiosr (bool)`: Run pretrained AudioSR diffusion super-resolution before the sinc/IST stage to synthesize content above the source's Nyquist. Default False.
+- `audiosr_model (str)`: AudioSR variant, `'basic'` or `'speech'`. Default `'basic'`.
+- `audiosr_ddim_steps (int)`: Diffusion sampling steps. Default 50.
+- `audiosr_guidance_scale (float)`: Classifier-free guidance scale. Default 3.5.
+- `audiosr_seed (int)`: RNG seed for AudioSR. Default 42.
+- `audiosr_device (str | None)`: Torch device override, e.g. `'cuda'` or `'cpu'`. Default None (auto).
 
 ## Running the Example
 
@@ -83,9 +105,13 @@ python example.py
 ```
 This will upscale the MP3 file specified in the example and produce a FLAC file with full processing.
 
+## On signal-altering options
+
+The pipeline preserves the source as much as possible by default in terms of internal precision (fp64) and FFmpeg decoding (`-drc_scale 0`). The toggles `toggle_normalize`, `toggle_autoscale`, and `toggle_adaptive_filter` *do* alter the signal — set them to `False` if you want the least intrusive result, or to `True` if you want the fuller processing chain. They are independent and can be combined freely.
+
 ## Spectrogram Results
 
-![Spectrogram Results](https://drive.google.com/uc?export=view&id=1uk_QVOm2M3jqtU66toFEuJ3iysFSzFw6)
+![Spectrogram Results](https://drive.google.com/uc?export=view&id=1nPGMHuR8hEeoo3rl8zWFuREf35uQF1IA)
 
 ## How it works
 
@@ -93,15 +119,17 @@ This will upscale the MP3 file specified in the example and produce a FLAC file 
 
 ## Algorithm Explanation
 
-The upscaling process involves several steps:
+The upscaling process involves the following stages:
 
-1. **Reading Audio File**: The audio file is read, and the audio samples are extracted along with the sample rate and bitrate.
-2. **Calculating Upscale Factor**: The upscale factor is calculated to achieve the target bitrate.
-3. **Upscaling Channels**: The audio channels are upscaled using an interpolation algorithm. Each sample is repeated multiple times to increase the resolution.
-4. **Iterative Soft Thresholding (IST)**: IST is applied to enhance the audio by adding missing frequencies. This process uses FFT to transform the signal into the frequency domain, apply a threshold to keep significant frequencies, and then inverse transform back to the time domain.
-5. **Scaling Amplitude**: The amplitude of the upscaled audio is scaled to match the original.
-6. **Normalizing Audio**: The audio is normalized to the range -1 to 1.
-7. **Writing FLAC File**: The processed audio is written to a FLAC file.
+1. **Reading Audio File**: The audio file is read; samples, sample rate, and bitrate are extracted.
+2. **(Optional) AudioSR Super-Resolution**: If `toggle_audiosr=True`, a pretrained latent-diffusion model synthesizes plausible high-frequency content above the source codec's lowpass (e.g. >16 kHz for MP3). Output is at 48 kHz.
+3. **Calculating Upscale Factor**: The integer upscale factor is derived from the target bitrate.
+4. **Bandlimited Upscaling**: Channels are upsampled by zero-padding the rFFT spectrum and inverse-transforming. This is mathematically equivalent to sinc interpolation and produces no spectral images (avoids the "ghosting" artifact zero-order hold creates above the original Nyquist).
+5. **Iterative Soft Thresholding (IST)**: FFT → threshold → IFFT loop reinforces significant frequency components and suppresses noise.
+6. **Auto-Scaling**: Per-channel amplitude is restored to match the original.
+7. **Normalization**: Audio is scaled to [-1, 1].
+8. **LMS Adaptive Filtering**: Block-parallel LMS — the signal is split into independent chunks processed sequentially per CUDA thread and in parallel across threads, eliminating the previous single-thread bottleneck.
+9. **Writing Output**: The processed audio is written as 24-bit FLAC or WAV.
 
 ## Why FFT and IST?
 
@@ -117,7 +145,30 @@ ericzo - beyond link(https://soundcloud.com/ericzomusic/free-electro-trap-anthem
 
 All notable changes to this project will be documented in this file.
 
-### [1.1.0] - 2024-08-01
+### [1.2.0.1] - 2026-04-28
+
+#### Fixed
+
+- Corrected the `upscale_factor` derivation. It previously divided the requested
+  target *bitrate* by the source *bitrate* and used that ratio as a sample-rate
+  multiplier, which produced absurd output sample rates (e.g. ~250–308 kHz and
+  ~5300 kbps reported FLAC bitrate from a 128 kbps MP3 source). The factor is
+  now derived from a sane target sample rate picked from the requested bitrate
+  tier and clamped to `[1, 4]` (typical 44.1 kHz MP3 sources now upscale to
+  88.2/176.4 kHz instead of 250 kHz+).
+- Replaced the single-thread LMS CUDA kernel with a block-parallel kernel.
+  The previous implementation ran the entire sequential LMS recurrence on one
+  CUDA thread, which made `toggle_adaptive_filter=True` hang for tens of
+  minutes on laptop GPUs (e.g. RTX 3060 Mobile) for short clips. The new
+  kernel splits the signal into independent chunks processed in parallel
+  across threads (block-LMS).
+
+#### Changed
+
+- `setup.py` and `requirements.txt`: `audiosr` and `torch` are now mandatory
+  dependencies and are automatically installed via `pip install fat-llama`.
+
+### [1.2.0] - 2026-04-28
 
 #### Chanaged
 

@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='fat_llama',
-    version='1.1.0',
+    version='1.2.0.1',
     packages=find_packages(),
     install_requires=[
         'numpy',
@@ -11,6 +11,8 @@ setup(
         'soundfile',
         'mutagen',
         'scipy',
+        'audiosr',
+        'torch',
     ],
     package_data={
         'fat_llama': ['audio_fattener/*.py', 'tests/*.py'],

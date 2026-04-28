@@ -8,9 +8,14 @@ upscale(
     target_format='flac',
     max_iterations=300,
     threshold_value=0.6,
-    target_bitrate_kbps=1400,
+    target_bitrate_kbps=1411,
     toggle_normalize=True,
     toggle_autoscale=True,
-    toggle_adaptive_filter=True
-
+    toggle_adaptive_filter=True,
+    toggle_audiosr=True,
+    audiosr_model='basic',
+    audiosr_ddim_steps=50,
+    audiosr_guidance_scale=3.5,
+    audiosr_seed=42,
+    audiosr_device=None,
 )
