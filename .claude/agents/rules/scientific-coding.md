@@ -7,13 +7,13 @@ These are the rules `generate-code` follows. Edit this file to change its standa
 Nothing gets edited until step 2 is written down.
 
 1. **Observe** — read `README.md` and `.claude/rules/project-mission.md` for what fat_llama actually is (mp3→flac as the primary tested outcome among supported formats, via iterative soft thresholding of FFT data, CUDA-only — no AI/ML-based upscaling), then read the factblock (`docs/CURRENT_STATE.md`, produced by the `review-current-state` skill) for the entries relevant to the target, then read the actual source/tests they point to. The factblock is a map, not ground truth: if it looks stale or missing for the files you need, say so and read the source directly instead of blocking on regenerating it.
-2. **Hypothesize** — state, in one or two sentences, your best-guess root cause and the specific change you believe fixes it. Write this down before touching any file. The fix must stay within the DSP/IST-FFT method described in `.claude/rules/project-mission.md` — if your best guess at a fix would require a trained/learned model, stop and report the conflict instead of hypothesizing around it.
+2. **Hypothesize** — state, in one or two sentences, your best-guess root cause and the specific change you believe fixes it. Write this down before touching any file. The fix must stay within the DSP/IST-FFT method described in `.claude/rules/project-mission.md` — if your best guess at a fix would require a trained/learned model, stop and report the conflict instead of hypothesizing around it. You may improve current scientific or mathematical mehtods for this or appy new ones, as extra methods.
 3. **Predict** — say what a test should show if the hypothesis is correct, and what it would show instead if the hypothesis is wrong.
 4. **Experiment** — make the smallest change that tests the hypothesis: usually a new or updated test that currently fails for the reason you hypothesize, isolating that one variable.
 5. **Analyze** — run the suite. Compare the actual result to the prediction.
    - Matches: implement/keep the fix, and keep the test as regression coverage.
    - Doesn't match: record what you actually observed, revise the hypothesis, and loop back to step 2. Never force a test to pass by weakening its assertion instead of understanding why the prediction was wrong.
-6. **Conclude** — once verified, make sure source and tests both reflect the fix, then re-run the full suite to check for regressions outside the target area.
+6. **Conclude** — once verified, make sure source and tests both reflect the fix, then re-run the full suite to check for regressions outside the target area. Try ensure backward compatibility of the main call.
 
 ## Model
 

@@ -40,7 +40,7 @@ Your final message must be *only* this JSON — no prose before or after it:
 - Report the root cause of a test failure, not just which assertion tripped — read the source, not just the traceback.
 - Don't weaken, skip, or reinterpret a failing test to make your report look better — a failing test is a finding, not a problem to route around.
 - Don't install new dependencies or add lint/coverage tooling unprompted; if coverage tooling (`coverage`, `pytest-cov`) isn't installed, note that and skip coverage rather than modifying `requirements.txt`/`setup.py`.
-- If a failure is environmental (e.g. `cupy-cuda12x` requires a GPU that isn't present), report it as a failure with that reason rather than trying to work around it.
+- If a failure is environmental (e.g. `cupy-cuda13x` requires a GPU that isn't present, or the installed CuPy build targets a different CUDA major version than the system driver/toolkit — this project targets CUDA 13, specifically 13.3 where a pinned version is needed), report it as a failure with that reason rather than trying to work around it.
 - Never edit `feed.py`, `test_feed.py`, or any other project file — if you catch yourself about to fix something, stop and put it in the report instead.
 - Checking that the coding is high qulity and not many drift from conventions.
 - Ensure this can be packaged and deployed easily to pypi for it to be easily picked up by others to use.

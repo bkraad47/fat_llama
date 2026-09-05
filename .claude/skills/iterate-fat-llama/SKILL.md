@@ -53,6 +53,8 @@ If all MAX_CYCLES cycles complete without the early stop in (c):
 
 1. Run `review-current-state` once more against the final chosen working tree, so `docs/CURRENT_STATE.md` matches what's about to ship.
 2. Create or update `CHANGELOG.md` at the repo root with a new entry (version number filled in during Step 6): date, and one bullet per *kept* fix — pull `hypothesis` / `changes` / `notes` from each kept cycle's `generate-code` JSON report. Drop any cycles that were rolled back in step (f); they never happened as far as the shipped result is concerned.
+3. If the changelog entry is empty (no kept cycles), still create a dated entry with a single bullet: "No changes were needed; all audio quality tests passed." This is a valid outcome and should be documented.
+4. Review the document holistcally and edit for clarity, grammar, and style. Make sure it reads like a human-written changelog entry, not a raw machine dump of JSON fields for github.
 
 ## Step 6 — version bump
 

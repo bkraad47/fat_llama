@@ -112,7 +112,7 @@ upscale(
 
 ## setup.py
 
-Package metadata for `fat_llama` (PyPI distribution). No functions/classes — a single `setuptools.setup(...)` call. Current `version`: `1.1.0`. `install_requires`: `numpy`, `cupy-cuda12x`, `pydub`, `soundfile`, `mutagen`, `scipy`. Declares console-script entry point `example=example:main`.
+Package metadata for `fat_llama` (PyPI distribution). No functions/classes — a single `setuptools.setup(...)` call. Current `version`: `1.1.0`. `install_requires`: `numpy`, `cupy-cuda13x`, `pydub`, `soundfile`, `mutagen`, `scipy`. Declares console-script entry point `example=example:main`.
 
 ## fat_llama/__init__.py
 

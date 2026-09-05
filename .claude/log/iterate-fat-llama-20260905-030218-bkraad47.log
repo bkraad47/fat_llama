@@ -1,0 +1,5 @@
+### [03:02:18 UTC] Step 0.1 — Mission context
+Input: User invoked /iterate-fat-llama with ARGUMENTS "fix failing code tests".
+Action: Read .claude/skills/rules/iterate-fat-llama.md, .claude/rules/scope-and-safety.md, .claude/rules/project-mission.md (all already in context, unchanged on disk), and README.md in full.
+Reasoning: Establish cycle policy, write scope, and mission context (mp3->flac via IST on FFT data, CUDA-only, no AI/ML upscaling) before making any changes.
+Output: Mission context loaded. DIRECTIVES = "fix failing code tests" (stored verbatim, to be reused unmodified in every generate-code dispatch this run).

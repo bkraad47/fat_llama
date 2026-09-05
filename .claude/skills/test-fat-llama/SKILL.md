@@ -1,6 +1,6 @@
 ---
 name: test-fat-llama
-description: Runs the code-tester-reviewer and audio-quality-checker subagents against fat_llama's code and tests, then reports combined structured JSON results (test outcomes, PEP8/code-quality feedback, audio quality). Use when asked to check, verify, or review fat_llama's code, tests, coverage, style, or audio output quality. Does not fix anything itself — see the generate-code skill for that.
+description: Runs the code-tester-reviewer and audio-quality-checker subagents against fat_llama's code and tests, then reports combined structured JSON results (test outcomes, PEP8/code-quality feedback, audio quality, coherence/spectral-deviation scores) and updates README.md's Audio Quality Scores section and spectrogram image. Use when asked to check, verify, or review fat_llama's code, tests, coverage, style, or audio output quality. Does not fix anything itself — see the generate-code skill for that.
 allowed-tools: Agent
 disable-model-invocation: false
 model: sonnet
@@ -10,7 +10,7 @@ When this skill is invoked, act as a coordinator over two dedicated subagents. D
 
 Before doing anything else, read `.claude/skills/rules/test-fat-llama.md` (merge contract and relaying policy) and `.claude/rules/scope-and-safety.md` (filesystem write scope and safety boundaries every skill/agent follows) — both may be updated over time without this file changing.
 
-**This skill only tests and reviews.** Neither subagent it dispatches modifies source code — `code-tester-reviewer` is read-only (it runs the suite and reviews style, it does not edit anything), and `audio-quality-checker` only ever touches test *assertions*, never production code. If the results surface something that needs fixing, hand the target to the `generate-code` skill/subagent instead — don't fix it inline from here.
+**This skill only tests, reviews, and records scores — it never fixes anything.** Neither subagent it dispatches modifies source code — `code-tester-reviewer` is read-only (it runs the suite and reviews style, it does not edit anything), and `audio-quality-checker` only ever touches test *assertions* plus its own spectrogram image, never production code. The one file this coordinator writes itself is `README.md`, and only the two regions defined in `.claude/skills/rules/test-fat-llama.md`'s README update contract. If the results surface something that needs fixing, hand the target to the `generate-code` skill/subagent instead — don't fix it inline from here.
 
 ## Logging
 
@@ -24,8 +24,10 @@ Before Step 1, open this run's log file per `.claude/rules/logging.md` (name: `t
 
 3. Each subagent's final message is JSON (see `.claude/agents/rules/code-quality.md` and `.claude/agents/rules/audio-quality.md` for the exact schemas):
    - `code-tester-reviewer` → `{"tests": [...], "quality": [...], "log": "..."}`
-   - `audio-quality-checker` → `{"tests": [...], "log": "..."}`
+   - `audio-quality-checker` → `{"tests": [...], "scores": {...}, "spectrogram_image": "...", "log": "..."}`
 
    Merge them per the merge contract in `.claude/skills/rules/test-fat-llama.md`.
 
-4. Output the merged JSON as your final result, per the relaying policy in `.claude/skills/rules/test-fat-llama.md`.
+4. If `audio-quality-checker`'s report has `scores` and `spectrogram_image`, update `README.md` per the **README update contract** in `.claude/skills/rules/test-fat-llama.md` (the scores table and the Spectrogram Results image reference). If either field is missing, skip this step and note why in the relayed result — don't write partial data.
+
+5. Output the merged JSON as your final result, per the relaying policy in `.claude/skills/rules/test-fat-llama.md`.

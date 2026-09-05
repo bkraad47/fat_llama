@@ -22,7 +22,7 @@ Install via pip:
 ```
 pip install fat-llama
 ```
-Note: This version works with CUDA 12.
+Note: This version works with CUDA 13 (tested against 13.3).
 
 Further need CUDA & CuPy properly installed: https://docs.cupy.dev/en/stable/install.html
 
@@ -86,6 +86,9 @@ This will upscale the MP3 file specified in the example and produce a FLAC file 
 ## Spectrogram Results
 
 ![Spectrogram Results](https://drive.google.com/uc?export=view&id=1uk_QVOm2M3jqtU66toFEuJ3iysFSzFw6)
+
+<!-- AUDIO_QUALITY_SCORES:START -->
+<!-- AUDIO_QUALITY_SCORES:END -->
 
 ## How it works
 

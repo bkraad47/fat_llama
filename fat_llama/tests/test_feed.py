@@ -30,7 +30,25 @@ class TestAudioFattener(unittest.TestCase):
         sample_rate, samples, bitrate, audio = read_audio(self.test_mp3_file, format='mp3')
         self.assertEqual(sample_rate, 44100)  # Default sample rate for the generated sine wave
         self.assertEqual(len(samples), 44100)  # 1 second of audio at 44100 Hz
-        self.assertEqual(bitrate, 63999)  # Bitrate of the generated MP3
+        # A mono source must come back as a flat 1-D array, not an (N, 2) reshape.
+        self.assertEqual(audio.channels, 1)
+        self.assertEqual(samples.ndim, 1)
+        self.assertEqual(len(audio), 1000)  # duration in ms
+        # The exact bitrate depends on the ffmpeg/LAME build, so assert the
+        # encoder's default CBR band rather than one hard-coded magic number.
+        self.assertGreaterEqual(bitrate, 32000)
+        self.assertLessEqual(bitrate, 320000)
+
+        # The samples must actually carry the audio content, not just be the
+        # right length: a 440 Hz sine must read back as a non-silent signal
+        # whose dominant spectral peak is 440 Hz.
+        self.assertGreater(np.max(np.abs(samples)), 0.0)
+        self.assertTrue(np.all(np.isfinite(samples)))
+        windowed = (samples - np.mean(samples)) * np.hanning(len(samples))
+        spectrum = np.abs(np.fft.rfft(windowed))
+        freqs = np.fft.rfftfreq(len(samples), 1.0 / sample_rate)
+        dominant_freq = freqs[np.argmax(spectrum)]
+        self.assertAlmostEqual(dominant_freq, 440.0, delta=5.0)
 
     def test_write_audio(self):
         sample_rate, samples, bitrate, audio = read_audio(self.test_mp3_file, format='mp3')
