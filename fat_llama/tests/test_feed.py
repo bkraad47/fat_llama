@@ -520,10 +520,21 @@ class TestAudioFattener(unittest.TestCase):
                 above_mask = freqs > original_nyquist
                 in_band_peak = float(np.max(spectrum[in_band_mask]))
 
-                if not np.any(above_mask):
-                    # upscale_factor came out to 1 (no upsampling
-                    # headroom exists to check); nothing to assert.
-                    continue
+                # There must actually be an above-original-Nyquist band to
+                # inspect -- otherwise this test would pass vacuously
+                # without ever exercising the cutoff. Both bitrates here
+                # drive an upscale_factor well above 1 against this
+                # source's deterministic 64 kbps LAME CBR encode, so an
+                # empty band means the upscale_factor derivation (or the
+                # output sample rate) regressed, which is itself a failure
+                # worth surfacing rather than silently skipping.
+                self.assertTrue(
+                    bool(np.any(above_mask)),
+                    f"Output sample rate {out_sr} Hz leaves no band above "
+                    f"the original {original_nyquist} Hz Nyquist frequency "
+                    "to check; upscale() did not upsample, so this "
+                    "regression test could not exercise the cutoff."
+                )
 
                 above_peak = float(np.max(spectrum[above_mask]))
                 self.assertLess(

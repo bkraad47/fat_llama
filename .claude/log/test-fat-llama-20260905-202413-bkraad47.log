@@ -1,0 +1,10 @@
+### [20:24:13 UTC] Step 0 — Setup
+Input: Dispatched by iterate-fat-llama cycle 5 (final cycle before the 5-cycle cap), candidate C_4 (commit 45165f4). No proposed_upscale_params carried forward.
+Action: Dispatching code-tester-reviewer and audio-quality-checker in parallel.
+
+### [20:44:00 UTC] Step 2-3 — Dispatch and merge
+Action: code-tester-reviewer (log .claude/log/code-tester-reviewer-20260905-202435-bkraad47.log): 10/10 code tests pass, 3 packaging/style findings (unused scipy dependency, still-outstanding setup.py console-script bug, one long line in setup.py). audio-quality-checker (log .claude/log/audio-quality-checker-20260905-202441-bkraad47.log, ~23.3 min): confirmed apply_original_nyquist_cutoff works excellently -- above-22050Hz band now at -175.0/-175.3 dB peak (-143.4 dB mean power), vs -136dB pre-cycle-4. coherence=9/10 (same as cycle 4's pre-fix test, since the band was already clean before the explicit guarantee -- this test run confirms the *guarantee* now holds structurally, not just observationally). spectral_deviation=9.0/10 (same numbers, same reference-file caveat). 2 audio_quality failures: test_feed_stereo_path_coverage (still-open finding from cycles 3-4, no test exercises the stereo path) and test_output_added_detail_below_original_nyquist (no measurable NEW detail below the original Nyquist -- the HF change is proportional emphasis of existing content, not new reconstruction; not a defect per se, caps coherence at 8-9 rather than 10).
+Merged: tests = 10 code (all pass) + 12 audio_quality (10 pass/2 fail) = 22 entries. quality = 3 packaging/style findings. scores: coherence=9/10, spectral_deviation=9.0/10.
+Output: README.md updated with cycle 5's (more complete/final) test results for C_4.
+
+### [20:44:00 UTC] DONE — Merged JSON (22 tests: 10 code all pass, 12 audio_quality 10 pass/2 fail; 3 quality findings; coherence=9, spectral_deviation=9.0). Nyquist cutoff confirmed working excellently (-175dB). Remaining gaps: stereo test coverage, no new detail below original Nyquist (not a defect, a ceiling).
