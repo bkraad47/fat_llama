@@ -90,16 +90,17 @@ Runs against the `output_test.flac` produced from `input_test.mp3` per "What to 
 - **Dropouts**: any contiguous run of near-zero samples (`abs(sample) < 1e-4`) longer than 50ms that has no corresponding silence in `input_test.flac` at the same position.
 - **Invalid samples**: any `NaN`/`Inf` in the output.
 - **Discontinuities**: sample-to-sample jumps (`abs(diff)`) whose 99.9th percentile is far above `input_test.flac`'s — a proxy for audible clicks/pops introduced by processing.
-- **Added detail**: compare `input_test.flac` vs output magnitude spectra (STFT, see below) in the frequency bands the reference has little/no energy in — a genuine upscale should raise energy there; a broadband noise-floor rise everywhere (not just missing bands) is degradation, not detail.
+- **Added detail**: compare `input_test.flac` vs output magnitude spectra (STFT, see below) in the frequency bands the reference has little/no energy in **below the original source's Nyquist frequency** — a genuine upscale should raise energy there; a broadband noise-floor rise everywhere (not just missing bands) is degradation, not detail.
+- **Content above the original Nyquist frequency**: per `.claude/rules/project-mission.md`'s hard constraint, the output must carry no meaningful energy above the original source file's Nyquist frequency (`original_sample_rate / 2`) — that band should sit at/near the FFT noise floor, many orders of magnitude below in-band content. This is checked independently of "added detail" above: it is never scored as a positive (fat_llama does not do bandwidth extension), and any measurable energy there — imaging, harmonics, filter artifacts, anything — is a defect. Report it as a failing test with a measured level (dB relative to in-band peak), and factor it into the coherence score below.
 
-Map to a score:
+Map to a score. **A precondition for any score above 5**: content above the original Nyquist frequency must sit at/near the FFT noise floor (per the check above) — meaningful energy there is treated the same as a coherence-degrading artifact (clipping, dropouts, etc.), never offset by other clean checks or by below-Nyquist added detail.
 
 | Value | Condition |
 |---|---|
-| 10 | No clipping/dropouts/invalid samples/abnormal discontinuities, **and** measurable added detail in previously-missing/congested bands without broadband noise rise. |
-| 8-9 | Clean on every check above, but no clearly measurable added detail (safe, transparent upscale). |
+| 10 | No clipping/dropouts/invalid samples/abnormal discontinuities/above-Nyquist content, **and** measurable added detail in previously-missing/congested bands *below* the original Nyquist frequency without broadband noise rise. |
+| 8-9 | Clean on every check above (including no above-Nyquist content), but no clearly measurable added detail below the original Nyquist (safe, transparent upscale). |
 | 6-7 | Clean on every check above, but spectral correlation with the input dipped slightly — still fully coherent to a listener. |
-| 5 | Quality degrades: noticeable broadband noise-floor rise or spectral correlation drop, but structure/pitch/rhythm intact — still recognizable as the same audio, just worse. |
+| 5 | Quality degrades: noticeable broadband noise-floor rise, spectral correlation drop, or measurable content above the original Nyquist frequency, but structure/pitch/rhythm intact — still recognizable as the same audio, just worse. |
 | 3-4 | Noticeable degradation: clipping fraction or dropouts present at a moderate level, still clearly recognizable as the same content. |
 | 1-2 | Severe artifacts: heavy clipping, long dropouts, or extreme spectral distortion — barely recognizable. |
 | 0 | Jibberish: `NaN`/`Inf` present, near-total silence, catastrophic clipping (>50%), or output spectral content has no meaningful correlation to the input — a human would not recognize it as the same audio. |

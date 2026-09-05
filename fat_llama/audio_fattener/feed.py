@@ -400,6 +400,62 @@ def normalize_signal(signal):
     return signal / cp.max(cp.abs(signal))
 
 
+def apply_original_nyquist_cutoff(
+    signal, original_sample_rate, new_sample_rate
+):
+    """
+    Zero out all spectral content above the original source's Nyquist
+    frequency, as an unconditional final safety stage.
+
+    Per the project's design (see `.claude/rules/project-mission.md`'s
+    "no content above the original Nyquist frequency" constraint),
+    fat_llama upscales precision/headroom within the original recording's
+    real bandwidth -- it does not do bandwidth extension. The band above
+    `original_sample_rate / 2` that an upsample opens up must stay
+    silent, not merely "usually end up silent" depending on how earlier
+    stages (interpolation, IST's harmonic term, autoscale, normalize,
+    LMS adaptive filtering) happen to behave.
+
+    As of the cycle-3 bandlimited-interpolation fix, that band already
+    measures ~-136 dB (near the FFT noise floor) for a real end-to-end
+    run -- this function's job is to make that a guarantee rather than
+    an emergent property, so it still holds even if some future change
+    to an earlier stage reintroduces energy there. It is applied
+    unconditionally (no toggle), after every other processing stage, so
+    no later step can reintroduce content past it.
+
+    Implemented entirely with `cp.fft` (CuPy/CUDA), matching the rest of
+    the pipeline's FFT/IST toolkit -- no scipy/numpy for this step, to
+    stay on the CUDA-only path: `cp.fft.rfft` the signal, zero every bin
+    whose frequency exceeds the original Nyquist frequency, then
+    `cp.fft.irfft` back to the time domain at the same length.
+
+    Parameters:
+    signal (cp.ndarray): The fully processed signal, sampled at
+        `new_sample_rate` (single channel).
+    original_sample_rate (int): The sample rate of the original source
+        audio, before upscaling. The cutoff frequency is
+        `original_sample_rate / 2`, not derived from `new_sample_rate`.
+    new_sample_rate (int or float): The sample rate `signal` is actually
+        sampled at (i.e. `original_sample_rate * upscale_factor`).
+
+    Returns:
+    cp.ndarray: `signal` with all spectral content above
+        `original_sample_rate / 2` removed, same length as `signal`.
+    """
+    signal = signal.astype(cp.float64)
+    n = len(signal)
+    if n == 0:
+        return signal
+
+    original_nyquist = original_sample_rate / 2.0
+    spectrum = cp.fft.rfft(signal)
+    freqs = cp.fft.rfftfreq(n, d=1.0 / new_sample_rate)
+    spectrum = cp.where(freqs <= original_nyquist, spectrum, 0)
+
+    return cp.fft.irfft(spectrum, n=n)
+
+
 def upscale(
     input_file_path,
     output_file_path,
@@ -542,12 +598,35 @@ def upscale(
     else:
         filtered_upscaled_channels = normalized_upscaled_channels
 
-    # Write the processed audio to the output file
+    # Final safety stage: unconditionally guarantee no meaningful spectral
+    # content survives above the *original* source's Nyquist frequency,
+    # regardless of what interpolation, IST, autoscale, normalize, or LMS
+    # did above -- fat_llama upscales precision/headroom within the
+    # original recording's real bandwidth, it does not do bandwidth
+    # extension (see apply_original_nyquist_cutoff's docstring). This has
+    # no toggle and runs after every other processing stage, right before
+    # write_audio, so nothing downstream can reintroduce content past it.
     new_sample_rate = sample_rate * upscale_factor
+    logger.info(
+        "Applying final Nyquist cutoff at %.1f Hz (original sample rate "
+        "%s Hz)...", sample_rate / 2.0, sample_rate
+    )
+    cutoff_channels = []
+    for i in range(filtered_upscaled_channels.shape[1]):
+        cutoff_channels.append(
+            apply_original_nyquist_cutoff(
+                filtered_upscaled_channels[:, i],
+                sample_rate,
+                new_sample_rate,
+            )
+        )
+    final_channels = cp.column_stack(cutoff_channels)
+
+    # Write the processed audio to the output file
     write_audio(
         output_file_path,
         new_sample_rate,
-        cp.asnumpy(filtered_upscaled_channels),
+        cp.asnumpy(final_channels),
         audio_format=target_format
     )
     logger.info(

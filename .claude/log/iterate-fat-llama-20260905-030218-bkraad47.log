@@ -95,4 +95,37 @@ Output: score_3 = 0.538 != 1.0. Satisfactory-results condition also not met (coh
 ### [09:52:00 UTC] Cycle 3 (resumed), step (d) — Fix
 Input: The lms_filter-is-a-noop finding, the no-measurable-added-detail finding, new DIRECTIVES, and the new Priorities section in scientific-coding.md (algorithm-level changes explicitly authorized this cycle).
 Action: Dispatched generate-code with full technical detail on both findings, explicit permission to revisit the interpolation algorithm if warranted, and secondary findings (stereo test coverage) noted as lower priority. Told it this is likely the most consequential cycle so far and to take the space needed.
-Output: Awaiting generate-code's completion.
+Output: Awaiting generate-code's completion (see next entry).
+
+### [10:15:00 UTC] Cycle 3 (resumed), step (d) — Fix result
+Input: generate-code completion (log .claude/log/generate-code-20260905-095209-bkraad47.log).
+Output: outcome=confirmed. Three substantive DSP fixes: (1) lms_filter gains a 1-sample decorrelation delay (Adaptive Line Enhancer pattern) so the self-referential lms_filter(channel, channel) call is no longer a degenerate identity no-op — genuine adaptation restored, warm-up dropout fix preserved. (2) IST's harmonic term amplitude now scales with the input's own peak (0.1*peak/max_iter) instead of a fixed constant that was ~1e-5 relative at real audio scale. (3) new_interpolation_algorithm replaced entirely: FFT-domain (cp.fft.rfft/irfft) bandlimited zero-padding interpolation instead of zero-order-hold duplication — removes the imaging artifacts flagged since cycle 1, stays 100% CuPy/CUDA, and is ~1000x faster as a side effect. 3 new regression tests added, full suite 8/8 pass. Deliberately NOT fixed (documented for follow-up): threshold_value is an absolute (not peak-relative) cutoff that barely triggers at real audio's raw-PCM/FFT-magnitude scale, making IST's masking mechanism mostly inert beyond the now-fixed harmonic term — flagged as a strong next-cycle candidate, not folded into this cycle to keep it evaluable on its own. README.md's Algorithm Explanation flagged stale (out of generate-code's write scope) — updated directly by the coordinator (steps 3-5 rewritten, added step 7 Adaptive Filtering, renumbered).
+Action: Coordinator updated README.md's Algorithm Explanation section directly (generate-code correctly declined, out of its fat_llama/**-only scope).
+
+### [10:15:00 UTC] Cycle 3 (resumed), step (e) — Checkpoint
+Action: git add -A && git commit -> 2c86136 "iterate-fat-llama: cycle 3 fix". Tagged iterate-fat-llama/20260905-030218/iter-3.
+Output: C_3 = commit 2c86136.
+
+Running score table so far: (1, 0.667), (2, 0.714), (3, 0.538 under corrected methodology — not directly comparable to cycles 1-2's pre-fix scores, but this is the first cycle to substantively address real audio quality rather than hygiene bugs).
+
+### [10:08:43 UTC] Cycle 4, step (a) — Review current state
+Action: review-current-state run (log .claude/log/review-current-state-20260905-100605-bkraad47.log) for C_3.
+
+### [10:08:43 UTC] Cycle 4, step (b) — Test
+Action: test-fat-llama run (log .claude/log/test-fat-llama-20260905-100843-bkraad47.log). Result: 17 tests (8 code all pass, 0 quality findings; 9 audio_quality: 6 pass/3 fail). coherence=9/10 (real, measurable improvement), spectral_deviation=9.0/10 (meaningful this time — dropped from a degenerate 10.0 because the new output correctly lacks the flawed reference's own imaging artifacts).
+ROOT CAUSE FOUND: IST's harmonic term (`cp.sin(linspace(0, 2*pi, len(data)))`) is ~0.066 Hz — one cycle across the whole buffer, subsonic DC-drift, not audible-band content. This is why nothing fills the band the bandlimited interpolation opened up above the original Nyquist; cycle 2's amplitude-scaling fix couldn't have addressed this since it's a frequency, not amplitude, defect. Secondary finding: no test exercises upscale() end-to-end with the adaptive filter enabled or stereo input.
+score_4 = 6/9 = 0.667.
+
+### [10:08:43 UTC] Cycle 4, step (c) — Early stop check
+Output: score_4 = 0.667 != 1.0. Satisfactory-results condition: code bugs=0 (met), coherence=9>8.5 (met), spectral_deviation=9.0 needs strictly >9.0 (NOT met, exactly equal), DIRECTIVES not fully satisfied (the core "add real detail" objective is still open). Not satisfactory — proceeding to fix.
+
+### [10:26:00 UTC] Cycle 4, step (d) — Fix
+Input: The IST harmonic term's frequency defect (subsonic ~0.066 Hz, not audible-band), secondary stereo/adaptive-filter test coverage gap.
+Action: Dispatched generate-code with the precise root-cause detail (cp.linspace(0, 2*pi, len) spans one cycle across the whole buffer regardless of sample rate), the algorithm's own stated purpose from README, and explicit freedom to choose the DSP approach (e.g. deriving injected content from the signal's own spectral envelope) rather than prescribing a specific fix.
+Output: Awaiting generate-code's completion (see next entry — this target was subsequently redirected).
+
+### [2026-09-06] Cycle 4, step (d) — Fix result (first attempt FAILED, redirected)
+Input: generate-code's first cycle 4 dispatch (log .claude/log/generate-code-20260905-103413-bkraad47.log) was pursuing the target as originally scoped (extrapolate real content into the band above original Nyquist from the signal's own spectrum). Mid-run, the user directed a redirect: notice spectral ghosting in the reference spectrogram (confirmed to be in input_test.flac, the known-flawed legacy reference, not the new output) and decided the product should NOT add detail above the original Nyquist at all -- instead the pipeline should explicitly guarantee that band is silent/removed via cutoff filtering. This reverses part of the earlier "add real detail" framing from earlier in cycle 4's own dispatch.
+Action: Sent a redirect message to the running agent via SendMessage. Before it could act on the redirect, the agent FAILED with an API rate/session limit error (HTTP 429, session limit reached). Inspected its partial uncommitted work: it had implemented (but not verified/confirmed) a spectral-extrapolation approach in iterative_soft_thresholding (new upscale_factor param, _extrapolate_missing_band helper, new test test_ist_harmonic_injection_targets_newly_opened_band) -- all pursuing the now-abandoned target. Discarded via `git checkout -- fat_llama/audio_fattener/feed.py fat_llama/tests/test_feed.py` (safe: nothing from this attempt was committed, HEAD is still 2c86136 from cycle 3).
+Updated persistent rules to codify the new constraint project-wide: .claude/rules/project-mission.md (new "Hard constraint: no content above the original Nyquist frequency" section), .claude/agents/rules/audio-quality.md (coherence scoring: above-Nyquist content is now a precondition for any score >5, never offset by other clean checks; added a dedicated check item), .claude/agents/rules/scientific-coding.md (Priorities section: explicit "never add content above original Nyquist" exception carved out of the "coherence first, algorithm changes authorized" priority).
+Output: Re-dispatching generate-code fresh with the corrected target: add an explicit FFT-domain cutoff/lowpass stage (after all other processing) so output never carries content above the original source's Nyquist frequency, rather than filling that band with extrapolated content.

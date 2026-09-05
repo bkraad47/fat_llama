@@ -6,8 +6,8 @@ import numpy as np
 import soundfile as sf
 
 from fat_llama.audio_fattener.feed import (
-    iterative_soft_thresholding, lms_filter, new_interpolation_algorithm,
-    read_audio, upscale, write_audio
+    apply_original_nyquist_cutoff, iterative_soft_thresholding, lms_filter,
+    new_interpolation_algorithm, read_audio, upscale, write_audio
 )
 
 
@@ -391,6 +391,153 @@ class TestAudioFattener(unittest.TestCase):
             freqs[cp.argmax(spectrum[freqs <= original_nyquist])]
         )
         self.assertAlmostEqual(dominant_freq, 300.0, delta=5.0)
+
+    def test_apply_original_nyquist_cutoff_removes_above_nyquist_content(
+        self
+    ):
+        # Regression test for this cycle's fix: fat_llama's design (per
+        # .claude/rules/project-mission.md's "no content above the
+        # original Nyquist frequency" constraint) requires the band above
+        # the *original* source's Nyquist frequency to be actively kept
+        # silent, not merely left clean as an emergent property of
+        # whichever stages happen to run beforehand. This test simulates
+        # what would happen if some future upstream stage (IST's harmonic
+        # term, autoscale, normalize, LMS) reintroduced genuine energy
+        # above the original Nyquist: it builds a synthetic "already
+        # fully processed" signal containing both an in-band tone (well
+        # below the original Nyquist) and an out-of-band tone (above the
+        # original Nyquist but below the upsampled Nyquist), then checks
+        # that apply_original_nyquist_cutoff removes the out-of-band tone
+        # to near the FFT noise floor while leaving the in-band tone
+        # essentially untouched.
+        original_sample_rate = 44100
+        upscale_factor = 2
+        new_sample_rate = original_sample_rate * upscale_factor
+        duration = 0.05
+        n = int(new_sample_rate * duration)
+        t = cp.linspace(0, duration, n, endpoint=False)
+
+        in_band_freq = 300.0  # well below the 22050 Hz original Nyquist
+        above_nyquist_freq = 30000.0  # above 22050, below the 44100 new
+        # Nyquist -- stands in for artifact energy some future stage
+        # might reintroduce above the original Nyquist.
+        signal = (
+            cp.sin(2 * cp.pi * in_band_freq * t)
+            + cp.sin(2 * cp.pi * above_nyquist_freq * t)
+        )
+
+        freqs = cp.fft.rfftfreq(n, d=1.0 / new_sample_rate)
+        original_nyquist = original_sample_rate / 2.0
+        in_band_mask = freqs <= original_nyquist
+        above_mask = freqs > original_nyquist
+
+        spectrum_before = cp.abs(cp.fft.rfft(signal))
+        in_band_peak_before = float(cp.max(spectrum_before[in_band_mask]))
+        above_peak_before = float(cp.max(spectrum_before[above_mask]))
+        # Sanity check the synthetic signal actually carries comparable
+        # energy in both bands before the cutoff -- otherwise this test
+        # would pass trivially without exercising the fix.
+        self.assertGreater(
+            above_peak_before, in_band_peak_before * 0.5,
+            "Test signal construction failed to place comparable energy "
+            "above the original Nyquist frequency; the test would not "
+            "meaningfully exercise apply_original_nyquist_cutoff."
+        )
+
+        cutoff_signal = apply_original_nyquist_cutoff(
+            signal, original_sample_rate, new_sample_rate
+        )
+        self.assertEqual(len(cutoff_signal), n)
+        self.assertTrue(bool(cp.all(cp.isfinite(cutoff_signal))))
+
+        spectrum_after = cp.abs(cp.fft.rfft(cutoff_signal))
+        in_band_peak_after = float(cp.max(spectrum_after[in_band_mask]))
+        above_peak_after = float(cp.max(spectrum_after[above_mask]))
+
+        self.assertLess(
+            above_peak_after, in_band_peak_before * 1e-6,
+            "apply_original_nyquist_cutoff left significant spectral "
+            f"content above the original Nyquist frequency (peak "
+            f"{above_peak_after:.3g} vs in-band peak "
+            f"{in_band_peak_before:.3g} before cutoff); the guarantee "
+            "that no content survives above the original Nyquist "
+            "frequency does not hold."
+        )
+        # The in-band tone must survive essentially unchanged -- the
+        # cutoff must not damage real, in-bandwidth content.
+        self.assertAlmostEqual(
+            in_band_peak_after, in_band_peak_before,
+            delta=in_band_peak_before * 0.05,
+            msg="apply_original_nyquist_cutoff altered in-band spectral "
+                "content it should have left untouched."
+        )
+        dominant_freq = float(freqs[cp.argmax(spectrum_after)])
+        self.assertAlmostEqual(dominant_freq, in_band_freq, delta=5.0)
+
+    def test_upscale_no_content_above_original_nyquist_frequency(self):
+        # Regression test for this cycle's fix: verifies the guarantee
+        # holds through a real (if fast/small) end-to-end upscale() call,
+        # not just for the apply_original_nyquist_cutoff unit in
+        # isolation -- confirming it is actually wired into the pipeline
+        # as the final stage. Checked at two different upscale_factors
+        # (via two target_bitrate_kbps values) since the cutoff's
+        # correctness depends on the original/new sample-rate ratio, not
+        # just a single hard-coded case. toggle_adaptive_filter=False and
+        # max_iterations=2 keep this fast (lms_filter's per-sample Python
+        # loop is slow -- see feed.py's own notes). Uses target_format=
+        # 'wav' rather than 'flac': this source's deterministic LAME CBR
+        # encode (64 kbps) combined with a high target_bitrate_kbps drives
+        # a large enough upscale_factor that the resulting sample rate
+        # exceeds FLAC's ~655350 Hz format ceiling (a pre-existing,
+        # unrelated libsndfile/FLAC limitation) -- WAV has no such low
+        # ceiling and is an equally valid target_format for this check.
+        original_nyquist = 44100 / 2.0
+
+        for target_bitrate_kbps in (800, 1400):
+            output_file = (
+                f'test_output_nyquist_{target_bitrate_kbps}.wav'
+            )
+            try:
+                upscale(
+                    input_file_path=self.test_mp3_file,
+                    output_file_path=output_file,
+                    source_format='mp3',
+                    target_format='wav',
+                    max_iterations=2,
+                    threshold_value=0.6,
+                    target_bitrate_kbps=target_bitrate_kbps,
+                    toggle_normalize=True,
+                    toggle_autoscale=True,
+                    toggle_adaptive_filter=False,
+                )
+
+                out_data, out_sr = sf.read(output_file, always_2d=True)
+                mono = out_data[:, 0]
+                spectrum = np.abs(np.fft.rfft(mono))
+                freqs = np.fft.rfftfreq(len(mono), 1.0 / out_sr)
+
+                in_band_mask = freqs <= original_nyquist
+                above_mask = freqs > original_nyquist
+                in_band_peak = float(np.max(spectrum[in_band_mask]))
+
+                if not np.any(above_mask):
+                    # upscale_factor came out to 1 (no upsampling
+                    # headroom exists to check); nothing to assert.
+                    continue
+
+                above_peak = float(np.max(spectrum[above_mask]))
+                self.assertLess(
+                    above_peak, in_band_peak * 1e-4,
+                    f"upscale() (target_bitrate_kbps={target_bitrate_kbps}"
+                    f") left significant spectral content above the "
+                    f"original {original_nyquist} Hz Nyquist frequency "
+                    f"(peak {above_peak:.3g} vs in-band peak "
+                    f"{in_band_peak:.3g}); the final Nyquist cutoff stage "
+                    "does not appear to be applied/effective."
+                )
+            finally:
+                if os.path.exists(output_file):
+                    os.remove(output_file)
 
     def test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate(
         self

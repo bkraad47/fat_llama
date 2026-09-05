@@ -1,0 +1,51 @@
+# audio-quality-checker run 20260905-100905 (user: bkraad47)
+
+### [10:09:05 UTC] Step 0 — Setup
+Input: Task from test-fat-llama coordinator; no proposed upscale params supplied -> baseline config. Note that new_interpolation_algorithm, iterative_soft_thresholding and lms_filter all changed since last run.
+Action: Read .claude/agents/rules/audio-quality.md and .claude/rules/scope-and-safety.md in full; read fat_llama/audio_fattener/feed.py and fat_llama/tests/test_feed.py; verified input_test.mp3, input_test.flac, example.py, docs/images/ exist; verified CuPy 14.2.0 with 1 CUDA device.
+Reasoning: Ground in rules + current source before measuring; confirm CUDA path available since project is CUDA-only.
+Output: Log file opened. Baseline config selected (source="baseline").
+
+### [10:12:30 UTC] Step 6a (launched early) — Baseline pipeline run dispatched to background
+Input: Fixed baseline config from audio-quality.md step 3 (input_test.mp3 -> output_test.flac, mp3->flac, max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, normalize/autoscale/adaptive_filter all True).
+Action: Wrote scratchpad/run_baseline.py with exactly that call; launched via Bash run_in_background:true (bg id bjchvr7jl). Interim log shows: source bitrate 192.00 kbps, upscale factor 7, stereo, interpolation+IST done for both channels, now in "Applying adaptive filtering".
+Reasoning: The LMS stage is a per-sample Python loop taking ~18-19 min for both channels; a foreground call would be killed at the 10-minute cap. Launched first so steps 1-2 run concurrently.
+Output: Running; awaiting DONE.
+
+### [10:13:10 UTC] Step 1 — read_audio/write_audio on synthesized samples
+Input: pydub Sine(440) 1s mono and 1s stereo MP3s generated in scratchpad.
+Action: scratchpad/step1_io.py -- read_audio(mp3) -> write_audio(flac), then inspected with soundfile + mutagen.flac.
+Reasoning: Verify the I/O primitives preserve rate/channels/duration and carry actual content, per "What to check" step 1.
+Output: PASS both. mono: in 44100 Hz / 1 ch / 1.000 s / 63999 bps -> out 44100 Hz / 1 ch / 1.000000 s / PCM_24 / 24 bit / 459.9 kbps real, peak 1.0, RMS 0.705, clipped fraction 4.5e-05, all finite, dominant freq 440.0 Hz, waveform corr vs peak-normalized input = 1.000000. stereo: in 44100 Hz / 2 ch / (44100,2) / 127997 bps -> out 44100 Hz / 2 ch / 1.000000 s / PCM_24 / 458.4 kbps real, peak 0.99999988, RMS 0.705, clipped fraction 2.3e-05, all finite, dominant 440.0 Hz, corr 1.000000. No rate/channel/duration drift; write_audio's peak normalization is a pure scalar gain.
+
+### [10:16:40 UTC] Step 2 — Test coherence review of fat_llama/tests/test_feed.py
+Input: fat_llama/tests/test_feed.py (8 tests) + current feed.py.
+Action: Read all 8 tests; ran `python -m unittest fat_llama.tests.test_feed -v` (note: pytest is not installed in .venv). Measured lms_filter fidelity directly (corr 0.99928, RMS ratio 0.99112, max rel err 0.0888, w[0]=1.0198, secondary taps ~0.0154/0.0112/0.0073) and the IST added term's spectrum.
+Reasoning: Determine whether assertions check audio content or just file existence, per "What to check" step 2.
+Output: 8/8 pass. No existence-only tests -- every test asserts on content (dominant frequency, waveform correlation, clipping fraction, RMS, finiteness, band-limiting above Nyquist). Gaps found: (a) test_lms_filter_self_referential_call_genuinely_adapts asserted only that weights moved / output isn't bit-identical, which a diverging or distorting LMS would also satisfy; (b) no test exercises upscale() with toggle_adaptive_filter=True (the only end-to-end test disables it) nor a stereo end-to-end path; (c) no test constrains WHERE in frequency IST's injected term lands.
+
+### [10:18:20 UTC] Step 3 — Assertion fix
+Input: Gap (a) from step 2.
+Action: Edited fat_llama/tests/test_feed.py, test_lms_filter_self_referential_call_genuinely_adapts only: added finiteness, input/output correlation > 0.99, and overall RMS ratio bounded to (0.9, 1.1) assertions. Re-ran that test.
+Reasoning: In-scope assertion strengthening (tests only); pins the newly-changed delay=1 ALE to "adapts without degrading" rather than merely "adapts". Gaps (b) and (c) are production/coverage issues left for generate-code, not fixed here.
+Output: PASS (test still green with measured margins corr 0.9993, RMS ratio 0.9911).
+
+### [10:47:30 UTC] Step 4/6 — Baseline pipeline run completed + test run
+Input: bg task bjchvr7jl (baseline config, unchanged).
+Action: Polled to completion. Full test suite re-run earlier: `python -m unittest fat_llama.tests.test_feed -v`.
+Reasoning: One pipeline run per invocation, exactly the pinned baseline; no parameter variation.
+Output: ELAPSED_SECONDS=1222.7 (20.4 min), exit 0. Log: source MP3 192.00 kbps -> upscale factor 7, stereo, output_test.flac written. Tests: 8/8 OK (9 assertions-strengthened test included). Output properties: 308700 Hz (44100*7), 2 ch, PCM_24, 15.1373 s (input_test.flac also 15.1373 s -> delta 0.000 s), real 2514.4 kbps, peak 1.0, RMS 0.192, 0 NaN, 0 Inf, clipping fraction 2.9e-06.
+
+### [10:50:10 UTC] Step 5/7 — Spectral analysis, coherence score, spectral deviation score, spectrogram
+Input: input_test.flac (reference) vs output_test.flac; scratchpad/analyze.py implementing the rules file's fixed algorithm.
+Action: Mono downmix, float64, both already at 308700 Hz (no resample needed), trimmed to min length (4672878 samples). scipy.signal.stft nperseg=2048 noverlap=1024, each spectrogram normalized by its own max. Also ran band-energy (RMS-normalized, gain-independent), dropout/discontinuity/clipping checks, sub-20 Hz energy analysis, and a ZOH-sinc transfer-model comparison. Wrote docs/images/spectrogram_comparison.png (two panels, shared 0-154.35 kHz y-limits, shared 0-15.14 s x-limits, shared -140..0 dB color scale).
+Reasoning: Per rules Scoring sections; the extra band/sub-20 Hz measurements attribute the observed differences to specific pipeline stages.
+Output: spectral_convergence=0.8166, correlation=0.9830 -> spectral_deviation_score=9.0. Coherence checks: clipping fraction 5.1e-05, dropouts >50ms unmatched in reference = 0, NaN/Inf = 0, discontinuity p99.9 out 0.01653 vs ref 0.05818 (ratio 0.284 - output is SMOOTHER, no clicks introduced), crest factor 5.21 (out) vs 5.14 (ref). Band deltas (out-ref, dB, RMS-normalized): 20-200 -0.04, 200-2k -0.14, 2k-10k +0.18, 10k-16k +1.94, 16k-19k +3.21, 19k-22.05k +3.73, 22.05k-40k -73.79, 40k-80k -93.76, 80k-154k -91.38. In-band out/ref transfer tracks the 1/sinc ZOH-compensation curve (measured vs model: 21.6 kHz 3.91/3.73 dB, 20 kHz 3.59/3.18, 16 kHz 2.99/1.96, 12.1 kHz 2.03/1.10). Sub-20 Hz energy fraction: output 3.32% vs reference 0.018%; single dominant bin at 0.0661 Hz (= 1/15.137 s) at 4.87% of peak amplitude. Coherence score = 9.
+
+### [10:52:00 UTC] Step 8 — Report
+Input: All measurements above.
+Action: Assembled the output-contract JSON (9 test entries, both scores, upscale_params_used source="baseline", spectrogram_image, log path).
+Reasoning: Final deliverable per rules file output contract.
+Output: JSON returned to caller. Findings flagged for generate-code: (1) IST's "harmonic reconstruction" term is cp.sin(cp.linspace(0, 2*pi, N)) -- exactly ONE cycle over the whole buffer, i.e. 1/duration Hz (0.0661 Hz here), so its entire 0.1*peak contribution lands subsonically (measured 4.87% of peak, 3.3% of total output energy) and adds no audible detail; (2) nothing is added above the original 22.05 kHz Nyquist (-136 dB), so the pipeline is now a transparent bandlimited resample plus a subsonic term; (3) the repo-root reference input_test.flac is itself a legacy pipeline output containing ZOH mirror images at ~44.1/88.2/132.3 kHz, which caps the achievable spectral_deviation score against it; (4) test coverage gaps: no end-to-end upscale() test with toggle_adaptive_filter=True and no stereo end-to-end test.
+
+### [10:52:10 UTC] DONE — Baseline run clean: coherence 9/10, spectral deviation 9.0/10 (convergence 0.8166, correlation 0.9830); tests 8/8 pass with one assertion set strengthened; main open issue is IST's added content landing entirely at 0.066 Hz (subsonic) with nothing above the original Nyquist.
