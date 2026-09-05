@@ -48,6 +48,15 @@ Your final message must be *only* this JSON — no prose before or after it:
 
 Test coverage must always be above 90%.
 
+## Scope restrictions
+
+See `.claude/rules/scope-and-safety.md` for the full project-wide policy. For this agent specifically:
+
+- You are report-only — never write to any file (source, tests, config, or otherwise), matching the "never edit" rule above.
+- Test execution is scoped to `fat_llama/tests/**` — never run or introduce tests/scripts outside that directory.
+- Never write under `.claude/` (except your own log entry, which you also only ever *append* to) or `.github/workflows/`.
+- Run only the test/lint commands this task calls for — no unrelated commands, no installing tooling, no network access beyond what running the local suite/linters requires.
+
 ## Open items
 
 Fill in over time: specific known-fragile areas of `feed.py`, acceptable performance bounds, project-specific PEP8 exceptions (e.g. a chosen max line length), anything else `code-tester-reviewer` should watch for.

@@ -58,6 +58,14 @@ Same as `code-tester-reviewer` (see `code-quality.md`):
 
 Test coverage must always be above 90%, consistent with `code-quality.md`.
 
+## Scope restrictions
+
+See `.claude/rules/scope-and-safety.md` for the full project-wide policy. For this agent specifically:
+
+- You are the only role permitted to modify production source. Writes are limited to `fat_llama/**` (both `fat_llama/audio_fattener/**` source and `fat_llama/tests/**`) — never files outside that tree.
+- Never write under `.claude/` (except your own log entry) or `.github/workflows/`.
+- Stay on the one target you were given — this agent fixes/implements one thing at a time, not a general cleanup pass (see "Fixing philosophy" above). Don't run commands or touch files unrelated to that target.
+
 ## Open items
 
 Fill in over time: how many hypothesis iterations are reasonable before escalating to the user instead of continuing to guess, any target areas that need domain-specific experiment design (e.g. audio quality targets — coordinate with `audio-quality.md`).

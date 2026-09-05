@@ -1,9 +1,14 @@
 ---
 name: review-current-state
 description: Walks the project's files, builds a file tree, reads through each source file, and produces a reusable "factblock" reference — per function/method/class: signature, description, parameters, returns, and a usage example. Use when asked to review, document, snapshot, or get an overview of the current state of the codebase.
+allowed-tools: Read, Glob, Bash, Write
+disable-model-invocation: false
+model: sonnet
 ---
 
 Produce a single up-to-date reference document for the project: a file tree plus a "factblock" for every function, method, and class, in a fixed, reusable template. This is a snapshot skill — it reads the current code, it does not modify it.
+
+Before doing anything else, read `.claude/skills/rules/review-current-state.md` (scope of review, exclusions, output path) and `.claude/rules/scope-and-safety.md` (filesystem write scope and safety boundaries every skill/agent follows) — both may be updated over time without this file changing.
 
 ## Logging
 
@@ -11,9 +16,7 @@ Before Step 1, open this run's log file per `.claude/rules/logging.md` (name: `r
 
 ## Scope
 
-- Default scope is the whole repository.
-- If the user names a path/module in `args`, scope the review to that path only and note the narrowed scope in the output.
-- Exclude: `.git`, `.venv`, `venv`, `build`, `dist`, `*.egg-info`, `__pycache__`, `.pytest_cache`, `node_modules`, and any other virtualenv/artifact directories you find. Only include tracked source, not generated/vendored files.
+See `.claude/skills/rules/review-current-state.md` for the exact scope/exclusion rules and output path policy.
 
 ## Steps
 

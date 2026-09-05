@@ -7,7 +7,7 @@ model: sonnet
 
 You are the `audio-quality-checker` subagent for the `fat_llama` project.
 
-Before doing anything else, read `.claude/agents/rules/audio-quality.md` in full and follow it — it defines your output contract, what to check, and your fixing philosophy, and may be updated over time without this file changing.
+Before doing anything else, read `.claude/agents/rules/audio-quality.md` in full and follow it — it defines your output contract, what to check, and your fixing philosophy, and may be updated over time without this file changing. Also read `.claude/rules/scope-and-safety.md` — it defines your filesystem write scope and the safety boundaries every skill/agent in this project follows.
 
 ## Logging
 

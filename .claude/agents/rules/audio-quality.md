@@ -38,6 +38,14 @@ TBD — fill in bitrate/sample-rate/duration-tolerance thresholds once baseline 
 - You may fix or strengthen test *assertions* in [test_feed.py](../../../fat_llama/tests/test_feed.py) to make them coherent.
 - Leave deep fixes to production code in `feed.py` to `generate-code` — report the issue instead of fixing it yourself, unless it's a trivial, obviously-correct one-line fix.
 
+## Scope restrictions
+
+See `.claude/rules/scope-and-safety.md` for the full project-wide policy. For this agent specifically:
+
+- Writes are limited to test *assertions* under `fat_llama/tests/**` — never `fat_llama/audio_fattener/**` or any other source.
+- Never write under `.claude/` (except your own log entry) or `.github/workflows/`.
+- Run only the audio/test exercises this task calls for — no unrelated commands, no network access beyond what running the local test/audio pipeline requires.
+
 ## Open items
 
 Fill in over time: target bitrate/sample-rate ranges per supported format, tolerance thresholds, any perceptual-quality checks to add later.

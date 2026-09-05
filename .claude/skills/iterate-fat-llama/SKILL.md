@@ -1,9 +1,14 @@
 ---
 name: iterate-fat-llama
 description: End-to-end iterate-and-ship loop for fat_llama — refreshes the review-current-state factblock, runs test-fat-llama, and dispatches generate-code to fix what it finds, repeating up to 5 cycles or until audio quality is fully satisfactory; rolls back to whichever cycle scored best if none was fully satisfactory; then regenerates docs, bumps the version, and opens a PR for review. Use when asked to autonomously iterate on fat_llama's code/tests/audio quality and ship the result as a reviewable PR, not just check it once.
+allowed-tools: Bash, Skill, Agent
+disable-model-invocation: true
+model: sonnet
 ---
 
-`args` is optional free-text directives on what to fix or not fix (e.g. "focus on bitrate accuracy, don't touch the CLI"). Store this text verbatim as `DIRECTIVES`. Reuse it unmodified in every `generate-code` call this run — never let it drift, get summarized, or be reinterpreted between cycles. Empty `args` means no constraints beyond what the test/review results themselves surface.
+Before doing anything else, read `.claude/skills/rules/iterate-fat-llama.md` in full — it defines the cycle cap, score formula, naming conventions, version-bump policy, and remote-action confirmation requirement referenced throughout the steps below, and may be updated over time without this file changing. Also read `.claude/rules/scope-and-safety.md` for the filesystem write scope and safety boundaries every skill/agent follows.
+
+`args` is optional free-text directives on what to fix or not fix (e.g. "focus on bitrate accuracy, don't touch the CLI"). Handle it per the DIRECTIVES rule in `.claude/skills/rules/iterate-fat-llama.md`.
 
 This skill coordinates other skills/subagents — it does not review, test, or fix anything itself. It also touches git branches, tags, and (at the very end, with confirmation) the GitHub remote — read Step 0 and Step 7 carefully.
 
@@ -15,12 +20,12 @@ Before Step 0, open this run's log file per `.claude/rules/logging.md` (name: `i
 
 1. `git status`. If there are uncommitted changes that aren't something you just made in this run, stop and ask the user before doing anything else — don't stash or discard in-progress work.
 2. Record the starting branch as `BASE_BRANCH` and current HEAD as `BASE_COMMIT`.
-3. Create a new branch off `BASE_COMMIT` named `iterate-fat-llama/<UTC timestamp>` (e.g. `iterate-fat-llama/20260905-141500`) and switch to it. Tell the user you've switched branches — `BASE_BRANCH` is left untouched for the rest of this run.
-4. Tag the untouched starting state: `git tag <branch>/iter-0`. This is candidate `C_0`. (Namespacing tags under `<branch>/` keeps repeated runs from colliding.)
+3. Create a new branch per the naming convention in `.claude/skills/rules/iterate-fat-llama.md` and switch to it. Tell the user you've switched branches — `BASE_BRANCH` is left untouched for the rest of this run.
+4. Tag the untouched starting state per that same naming convention (`iter-0`). This is candidate `C_0`.
 
-## Steps 1–4 — the iteration loop (up to 5 cycles)
+## Steps 1–4 — the iteration loop (up to MAX_CYCLES)
 
-For `i = 1..5`:
+For `i = 1..MAX_CYCLES` (see the cycle policy in `.claude/skills/rules/iterate-fat-llama.md` for the current cap and score formula):
 
 **a. Review current state.** Run the `review-current-state` skill (Skill tool) to refresh `docs/CURRENT_STATE.md` against the working tree as it stands right now — that's candidate `C_{i-1}` (the original code when `i=1`, or the previous cycle's fix when `i>1`).
 
@@ -35,11 +40,11 @@ For `i = 1..5`:
 
 **d. Fix.** Otherwise, launch the `generate-code` subagent (Agent tool, `subagent_type: "generate-code"`, `run_in_background: false`) with a prompt containing: the full `test-fat-llama` JSON from (b), and `DIRECTIVES` verbatim if non-empty — ask it to address the reported test/quality/audio findings within those directives.
 
-**e. Checkpoint.** Commit whatever `generate-code` changed (`git add -A && git commit -m "iterate-fat-llama: cycle <i> fix"`) and tag the result `<branch>/iter-<i>` — this is candidate `C_i`. If `generate-code` reported no changes were needed, still tag current HEAD as `<branch>/iter-<i>` (so `C_i == C_{i-1}`, which will simply score the same next cycle).
+**e. Checkpoint.** Commit whatever `generate-code` changed (`git add -A && git commit -m "iterate-fat-llama: cycle <i> fix"`) and tag the result per the naming convention (`<branch>/iter-<i>`) — this is candidate `C_i`. If `generate-code` reported no changes were needed, still tag current HEAD as `<branch>/iter-<i>` (so `C_i == C_{i-1}`, which will simply score the same next cycle).
 
-If all 5 cycles complete without the early stop in (c):
+If all MAX_CYCLES cycles complete without the early stop in (c):
 
-**f. Roll back to the best cycle.** Find `i* = argmax(score_i)` over `i=1..5` (tie-break toward the smaller `i` — prefer the earliest, simplest state that reached the best score). Reset the working tree to candidate `C_{i*-1}`: `git reset --hard <branch>/iter-<i*-1>` (use `<branch>/iter-0` when `i*==1`). This discards later cycles that made things worse — nothing is actually lost, every cycle's code is still reachable via its tag. Tell the user which cycle was kept and its score versus the others.
+**f. Roll back to the best cycle.** Apply the rollback rule from `.claude/skills/rules/iterate-fat-llama.md`: find `i* = argmax(score_i)`, tie-broken toward the smaller `i`, and reset the working tree to candidate `C_{i*-1}`: `git reset --hard <branch>/iter-<i*-1>` (use `<branch>/iter-0` when `i*==1`). This discards later cycles that made things worse — nothing is actually lost, every cycle's code is still reachable via its tag. Tell the user which cycle was kept and its score versus the others.
 
 ## Step 5 — docs and changelog
 
@@ -49,14 +54,16 @@ If all 5 cycles complete without the early stop in (c):
 ## Step 6 — version bump
 
 1. Read the current `version` in [setup.py](../../../setup.py).
-2. Bump it: patch-level by default (increment the last numeric segment). Use a minor bump only if `DIRECTIVES` explicitly asked for new functionality rather than fixes/quality work. State which you chose and why.
+2. Bump it per the version-bump policy in `.claude/skills/rules/iterate-fat-llama.md` (patch by default, minor only if `DIRECTIVES` explicitly asked for new functionality). State which you chose and why.
 3. Update `setup.py`'s `version` field and fill the version number into the `CHANGELOG.md` entry from Step 5.
 
 ## Step 7 — version-specific PR
 
-1. Show the user a summary before doing anything remote: the version bump, files changed, the changelog entry, and which cycle's state was kept (or that the loop stopped early because it was already satisfactory). **Ask for explicit confirmation before pushing or opening a PR** — this is the one part of this skill that touches the shared GitHub remote and isn't locally reversible the way the git tags/commits above are.
+Follow the "Remote actions" policy in `.claude/skills/rules/iterate-fat-llama.md` — confirmation before anything remote:
+
+1. Show the user a summary before doing anything remote: the version bump, files changed, the changelog entry, and which cycle's state was kept (or that the loop stopped early because it was already satisfactory). **Ask for explicit confirmation before pushing or opening a PR.**
 2. On confirmation: commit the docs/changelog/version-bump changes.
-3. Rename the local branch to match this repo's version-branch convention (see existing branches/tags like `v-1.3.0`, `v-1.2.0.1`): `git branch -m v-<new_version>`.
+3. Rename the local branch to the version-branch naming convention: `git branch -m v-<new_version>`.
 4. Push it: `git push -u origin v-<new_version>`.
 5. Open a PR against `main`: `gh pr create --base main --title "v-<new_version>" --body "<changelog entry>"`. If `gh` isn't installed or authenticated, push the branch anyway and give the user the compare link (`https://github.com/bkraad47/fat_llama/compare/main...v-<new_version>`) so they can open the PR by hand.
 6. Report the PR URL (or the compare link) as the final result.
