@@ -11,6 +11,29 @@ from fat_llama.audio_fattener.feed import (
 )
 
 
+def _cuda_gpu_available():
+    # This project is CUDA-only by design (no CPU fallback -- see
+    # .claude/rules/project-mission.md); a missing/insufficient GPU driver
+    # is an environmental limitation to report, not something to work
+    # around with a CPU code path. GitHub's free-tier hosted CI runners
+    # (ubuntu-latest) have no GPU hardware at all, so any test that
+    # actually exercises cupy compute would otherwise crash there with a
+    # raw CUDARuntimeError regardless of code correctness. This check lets
+    # such tests skip cleanly with a clear reason in that environment,
+    # while still running normally wherever a real CUDA GPU is present
+    # (including this project's own local development machines).
+    try:
+        return cp.cuda.runtime.getDeviceCount() > 0
+    except Exception:
+        return False
+
+
+GPU_AVAILABLE = _cuda_gpu_available()
+requires_gpu = unittest.skipUnless(
+    GPU_AVAILABLE, "requires a CUDA-capable GPU (none available/functional)"
+)
+
+
 class TestAudioFattener(unittest.TestCase):
 
     def setUp(self):
@@ -138,6 +161,7 @@ class TestAudioFattener(unittest.TestCase):
             if os.path.exists(output_file):
                 os.remove(output_file)
 
+    @requires_gpu
     def test_lms_filter_no_extended_warmup_dropout(self):
         # Regression test: lms_filter() used to zero-initialize both its
         # tap weights and its output buffer for the first num_taps samples,
@@ -176,6 +200,7 @@ class TestAudioFattener(unittest.TestCase):
             "of tracking the signal from (near) the first sample."
         )
 
+    @requires_gpu
     def test_ist_harmonic_injection_bounded_across_iterations(self):
         # Regression test: iterative_soft_thresholding() used to add a
         # fixed 0.1-amplitude sinusoid every single iteration with no
@@ -211,6 +236,7 @@ class TestAudioFattener(unittest.TestCase):
             "across max_iter."
         )
 
+    @requires_gpu
     def test_lms_filter_self_referential_call_genuinely_adapts(self):
         # Regression test for a cycle 3 finding: upscale() always calls
         # lms_filter(channel, channel) -- signal and desired are the SAME
@@ -279,6 +305,7 @@ class TestAudioFattener(unittest.TestCase):
             f"RMS in that window ({early_signal_rms:.4f})."
         )
 
+    @requires_gpu
     def test_ist_harmonic_amplitude_scales_with_signal_peak(self):
         # Regression test for a cycle 3 finding: iterative_soft_
         # thresholding's harmonic injection term used a fixed absolute
@@ -338,6 +365,7 @@ class TestAudioFattener(unittest.TestCase):
             "unmeasurable at real (raw PCM-scale) audio amplitudes."
         )
 
+    @requires_gpu
     def test_new_interpolation_algorithm_is_bandlimited(self):
         # Regression test for a cycle 3 finding: new_interpolation_
         # algorithm used zero-order-hold duplication (each sample
@@ -392,6 +420,7 @@ class TestAudioFattener(unittest.TestCase):
         )
         self.assertAlmostEqual(dominant_freq, 300.0, delta=5.0)
 
+    @requires_gpu
     def test_apply_original_nyquist_cutoff_removes_above_nyquist_content(
         self
     ):
@@ -474,6 +503,7 @@ class TestAudioFattener(unittest.TestCase):
         dominant_freq = float(freqs[cp.argmax(spectrum_after)])
         self.assertAlmostEqual(dominant_freq, in_band_freq, delta=5.0)
 
+    @requires_gpu
     def test_upscale_no_content_above_original_nyquist_frequency(self):
         # Regression test for this cycle's fix: verifies the guarantee
         # holds through a real (if fast/small) end-to-end upscale() call,
@@ -550,6 +580,7 @@ class TestAudioFattener(unittest.TestCase):
                 if os.path.exists(output_file):
                     os.remove(output_file)
 
+    @requires_gpu
     def test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate(
         self
     ):
