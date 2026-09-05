@@ -1,0 +1,6 @@
+### [21:00:07 UTC] Step 1-6 — Final refresh for shipped state
+Input: Dispatched by iterate-fat-llama Step 5, against the final chosen working tree (C_4, commit 45165f4 + cycle 5's test-strengthening commit 19b4c32; loop stopped after cycle 5's test pass, no cycle 5 fix — see top-level log).
+Action: Only fat_llama/tests/test_feed.py changed since the last snapshot (audio-quality-checker's cycle 5 strengthening of test_upscale_no_content_above_original_nyquist_frequency: replaced a silent `continue`/skip with an explicit assertion that an above-Nyquist band exists to check). Updated that method's factblock to describe the strengthened assertion.
+Output: docs/CURRENT_STATE.md updated in place; already otherwise current from the cycle 4 checkpoint update.
+
+### [21:00:07 UTC] DONE — docs/CURRENT_STATE.md regenerated for the final shipped state (C_4 + cycle 5 test strengthening).

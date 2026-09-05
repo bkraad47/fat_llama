@@ -1,0 +1,28 @@
+# audio-quality-checker run 20260905-032548 (bkraad47)
+
+### [03:25:48 UTC] Step 0 — Init
+Input: Task from test-fat-llama/parent: check audio output quality + test coherence; pinned baseline config max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400.
+Action: Read .claude/agents/rules/audio-quality.md, .claude/rules/scope-and-safety.md, fat_llama/audio_fattener/feed.py, fat_llama/tests/test_feed.py, example.py. Created .claude/log/ and docs/images/.
+Reasoning: Rules file defines output contract, scoring algorithms, and write scope before any work starts.
+Output: Log opened at .claude/log/audio-quality-checker-20260905-032548-bkraad47.log. Baseline config confirmed identical to example.py.
+
+### [03:29:10 UTC] Step 1 — read_audio/write_audio on synthesized sample
+Input: pydub Sine(440), 1000 ms, exported to scratchpad synth_sine.mp3.
+Action: Ran scratchpad/step1_rw.py: read_audio(mp3) then write_audio() to both FLAC and WAV; inspected with soundfile.info/read and mutagen.flac.FLAC.
+Reasoning: Rules "What to check" step 1 — verify bitrate/sample rate/channels/duration on a controlled signal where ground truth is known.
+Output: read_audio OK — sr=44100, 44100 samples, ndim=1 (mono not wrongly reshaped), channels=1, duration=1000 ms, bitrate=63999 bps (in 32k-320k band), dominant freq=440.0 Hz, dtype float64, max_abs=31212.0 (raw int16 PCM scale).
+  write_audio FLAC: sr=44100 preserved, channels=1, duration=1.000 s, subtype=PCM_24, flac bitrate=938384 bps (938.4 kbps vs 1058.4 kbps nominal 24-bit PCM), finite=True.
+  write_audio WAV: sr=44100, channels=1, duration=1.000 s, PCM_24, 1058.8 kbps.
+  BUG: both outputs clipped_fraction=0.99993 and max_abs=1.0, rms=0.99997 (a sine's rms should be ~0.707). write_audio() passes read_audio()'s raw-PCM-scale float64 straight to sf.write with an integer subtype, so every sample |x|>1 is clamped to full scale -> 440 Hz sine becomes a hard-clipped square wave. Production bug in feed.py write_audio(), reported not fixed (source is out of this agent's write scope).
+
+### [03:30:05 UTC] Step 2 — test coherence review of fat_llama/tests/test_feed.py
+Input: fat_llama/tests/test_feed.py (2 tests: test_read_audio, test_write_audio).
+Action: Read the file and judged each assertion against "does it check audio content, not just file existence".
+Reasoning: Rules "What to check" step 2.
+Output: Both existing tests are coherent — they already assert sample rate, sample count, ndim, channels, duration, bitrate band, non-silence, finiteness, dominant-frequency (440 Hz), round-trip sr/channels/duration and a clipping-fraction bound. No assertion weakening or fixing needed. Gaps noted for report: new_interpolation_algorithm is imported but never exercised; unittest.mock patch/MagicMock imported but unused; no test covers upscale/iterative_soft_thresholding/lms_filter/normalize_signal. Not adding new tests (scope is assertions only).
+
+### [03:31:20 UTC] Step 4a — run test suite
+Input: fat_llama/tests/test_feed.py; pytest not installed in .venv, used unittest.
+Action: python -m unittest fat_llama.tests.test_feed -v
+Reasoning: Rules "What to check" step 4 — run tests and confirm output audio coherence.
+Output: 2 ran, 1 FAILED. test_read_audio ok. test_write_audio FAILED: "np.float64(0.9999319727891156) not less than 0.05 — 99.99% of written samples are clipped to full scale". This confirms the Step 1 finding via the suite; assertion is correct and was NOT weakened.

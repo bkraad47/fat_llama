@@ -1,0 +1,10 @@
+### [10:06:05 UTC] Step 1-3 — Read source
+Input: Dispatched by iterate-fat-llama cycle 4 (candidate C_3, commit 2c86136). generate-code's cycle 3 report (factblock_stale) named fat_llama/audio_fattener/feed.py and fat_llama/tests/test_feed.py.
+Action: Read both files in full. feed.py: new_interpolation_algorithm rewritten (FFT-domain bandlimited interpolation replacing zero-order-hold), iterative_soft_thresholding's harmonic term now peak-relative, lms_filter gained delay/return_weights params (ALE decorrelation fix for the self-referential no-op bug), all line numbers shifted (file grew 332->557 lines). test_feed.py: 3 new tests (test_lms_filter_self_referential_call_genuinely_adapts, test_ist_harmonic_amplitude_scales_with_signal_peak, test_new_interpolation_algorithm_is_bandlimited), imports updated, all line numbers shifted (285->507 lines).
+Output: Full re-read confirmed generate-code's own excellent docstrings already document the fixes' reasoning in detail; leaned on those directly for factblock descriptions.
+
+### [10:06:05 UTC] Step 4-6 — Write factblocks and assemble
+Action: Edited docs/CURRENT_STATE.md: rewrote new_interpolation_algorithm, iterative_soft_thresholding, and lms_filter factblocks (including lms_filter's new signature with delay/return_weights); updated line numbers for initialize_ist/upscale_channels/normalize_signal/upscale; updated test_feed.py's module intro and all existing method line numbers; added 3 new test method factblocks; refreshed Notes (marked the zero-order-hold imaging note resolved, added the new threshold_value known-issue note, updated the performance note to reflect interpolation's ~1000x speedup while flagging lms_filter as still the dominant cost, updated the reference-file-independence note with cycle 3's reconfirmation).
+Output: docs/CURRENT_STATE.md updated in place.
+
+### [10:06:05 UTC] DONE — docs/CURRENT_STATE.md regenerated for candidate C_3 (cycle 3's three DSP fixes fully reflected).

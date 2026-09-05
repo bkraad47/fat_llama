@@ -1,0 +1,202 @@
+name: Resolve Issue Branch
+
+on:
+  create
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  resolve:
+    if: ${{ github.event.ref_type == 'branch' && github.actor == 'bkraad47' }}
+    runs-on: ubuntu-latest
+    environment: Issue-Triage
+    steps:
+      - name: Guard — parse issue number and confirm assignment
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ github.event.ref }}
+        run: |
+          ISSUE_NUMBER=$(echo "$BRANCH_NAME" | grep -oE '^[0-9]+' || true)
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "Branch '$BRANCH_NAME' has no leading issue number — not an issue-linked branch, nothing to do."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ASSIGNEES=$(gh issue view "$ISSUE_NUMBER" --json assignees --jq '.assignees[].login' 2>/dev/null || true)
+          if ! echo "$ASSIGNEES" | grep -qx "bkraad47"; then
+            echo "Issue #$ISSUE_NUMBER is not assigned to bkraad47 — skipping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Resolving issue #$ISSUE_NUMBER on branch $BRANCH_NAME"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout issue branch
+        if: steps.guard.outputs.proceed == 'true'
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.ref }}
+          fetch-depth: 0
+
+      - name: Fetch issue content
+        if: steps.guard.outputs.proceed == 'true'
+        id: issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue view "${{ steps.guard.outputs.issue_number }}" \
+            --json number,title,body,comments \
+            > issue_raw.json
+          echo "Fetched issue #${{ steps.guard.outputs.issue_number }}"
+
+      - name: Set up Python
+        if: steps.guard.outputs.proceed == 'true'
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy
+          pip install cupy-cuda13x
+          pip install pydub
+          pip install soundfile
+          pip install mutagen
+          pip install scipy
+          pip install .
+
+      - name: Install Claude Code CLI
+        if: steps.guard.outputs.proceed == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Write MCP config
+        if: steps.guard.outputs.proceed == 'true'
+        env:
+          MCP_SERVER: ${{ secrets.MCP_SERVER }}
+          MCP_SECRET: ${{ secrets.MCP_SECRET }}
+        run: |
+          cat > /tmp/mcp-ci.json <<EOF
+          {
+            "mcpServers": {
+              "fllm-mcp-server": {
+                "type": "http",
+                "url": "${MCP_SERVER}",
+                "headers": {
+                  "Authorization": "Bearer ${MCP_SECRET}"
+                }
+              }
+            }
+          }
+          EOF
+
+      - name: Triage issue content
+        if: steps.guard.outputs.proceed == 'true'
+        id: triage
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_SECRET }}
+        run: |
+          RAW_ISSUE=$(cat issue_raw.json)
+          TRIAGE_RAW=$(claude -p "/triage-issue $RAW_ISSUE" \
+            --allowedTools "" \
+            --output-format json \
+            < /dev/null)
+          TRIAGE_RESULT=$(echo "$TRIAGE_RAW" | jq -r '.result')
+          # Defensively strip a markdown code fence if the model wrapped its
+          # JSON output in one despite being told not to.
+          echo "$TRIAGE_RESULT" | sed -e '/^```/d' > triage_result.json
+
+          CLEAN_STATEMENT=$(jq -r '.clean_problem_statement' triage_result.json)
+          if [ -z "$CLEAN_STATEMENT" ] || [ "$CLEAN_STATEMENT" == "null" ]; then
+            CLEAN_STATEMENT="Issue #${{ steps.guard.outputs.issue_number }}: no usable problem statement could be extracted."
+          fi
+
+          {
+            echo "clean_statement<<TRIAGE_EOF"
+            echo "$CLEAN_STATEMENT"
+            echo "TRIAGE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Triage notes: $(jq -r '.notes // empty' triage_result.json)"
+          echo "Triage relevance: $(jq -r '.relevant // empty' triage_result.json)"
+
+      - name: Run iterate-fat-llama
+        if: steps.guard.outputs.proceed == 'true'
+        id: iterate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_SECRET }}
+          ITERATE_FAT_LLAMA_CI_MODE: "1"
+          ITERATE_FAT_LLAMA_ISSUE_NUMBER: ${{ steps.guard.outputs.issue_number }}
+        run: |
+          CLEAN_STATEMENT="${{ steps.triage.outputs.clean_statement }}"
+
+          set +e
+          ITERATE_RAW=$(claude -p "/iterate-fat-llama $CLEAN_STATEMENT" \
+            --dangerously-skip-permissions \
+            --mcp-config /tmp/mcp-ci.json \
+            --strict-mcp-config \
+            --output-format json \
+            < /dev/null)
+          CLAUDE_EXIT=$?
+          set -e
+
+          ITERATE_RESULT=$(echo "$ITERATE_RAW" | jq -r '.result // empty')
+          echo "$ITERATE_RESULT" > iterate_result.txt
+
+          if [ $CLAUDE_EXIT -ne 0 ] || echo "$ITERATE_RESULT" | grep -q "ITERATE_FAT_LLAMA_FAILURE_JSON:"; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report failure
+        if: steps.guard.outputs.proceed == 'true' && steps.iterate.outputs.failed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FAILURE_JSON=$(grep -A 100 "ITERATE_FAT_LLAMA_FAILURE_JSON:" iterate_result.txt | tail -n +2 | sed -e '/^```/d' || true)
+          if [ -z "$FAILURE_JSON" ]; then
+            FAILURE_JSON='{"stage": "unknown", "error": "claude_cli_error", "error_description": "claude -p exited non-zero or produced no parseable result", "details": "See workflow run logs for the raw output."}'
+          fi
+
+          STAGE=$(echo "$FAILURE_JSON" | jq -r '.stage // "unknown"')
+          ERROR=$(echo "$FAILURE_JSON" | jq -r '.error // "unknown"')
+          DESCRIPTION=$(echo "$FAILURE_JSON" | jq -r '.error_description // "no description"')
+          DETAILS=$(echo "$FAILURE_JSON" | jq -r '.details // "no details"')
+
+          echo "::error title=iterate-fat-llama failed at $STAGE::$ERROR — $DESCRIPTION"
+          {
+            echo "## iterate-fat-llama automated run failed"
+            echo ""
+            echo "- **Stage:** $STAGE"
+            echo "- **Error:** $ERROR"
+            echo "- **Description:** $DESCRIPTION"
+            echo "- **Details:** $DETAILS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "An automated attempt to resolve this issue failed."
+            echo ""
+            echo "- **Stage:** $STAGE"
+            echo "- **Error:** $ERROR"
+            echo "- **Description:** $DESCRIPTION"
+            echo ""
+            echo "See the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for full details."
+          } > /tmp/failure_comment.md
+
+          gh issue comment "${{ steps.guard.outputs.issue_number }}" --body-file /tmp/failure_comment.md
+          exit 1

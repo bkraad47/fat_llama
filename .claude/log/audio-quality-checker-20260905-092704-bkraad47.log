@@ -1,0 +1,59 @@
+# audio-quality-checker run 20260905-092704 (bkraad47)
+
+### [09:27:04 UTC] Step 0 — Init
+Input: Task from test coordinator; no proposed upscale() params supplied this run.
+Action: Read .claude/agents/rules/audio-quality.md and .claude/rules/scope-and-safety.md in full; opened this log.
+Reasoning: Rules file was updated (coherence now graded vs input_test.flac, shared spectrogram zoom, new upscale_params_used field); must re-read before acting.
+Output: Baseline config selected (source="baseline"), matching example.py.
+
+### [09:28:10 UTC] Step 3 (launched early) — Baseline upscale() pipeline run
+Input: input_test.mp3 (364922 bytes), baseline config from rules "What to check" step 3.
+Action: Wrote scratchpad/run_baseline.py calling upscale(input_test.mp3 -> output_test.flac, mp3->flac, max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, normalize/autoscale/adaptive_filter all True); launched via Bash run_in_background:true (id bf6jm0hve).
+Reasoning: Run takes ~20 min (LMS filter is a per-sample Python loop); a foreground Bash call is capped at 10 min and would be killed. Launched first so steps 1-2 overlap the wait.
+Output: Background job started, awaiting completion notification.
+
+### [09:31:40 UTC] Step 1 — read_audio/write_audio on synthesized samples
+Input: pydub Sine 440 Hz mono 1s MP3; plus a 440/660 Hz stereo MP3.
+Action: Ran scratchpad/step1_rw.py: read_audio() then write_audio() to FLAC for both, inspected with soundfile.
+Reasoning: Verify bitrate/sample rate/channels/duration/content preservation per rules step 1.
+Output: PASS. Mono: sr 44100 preserved, 44100 samples, ndim=1, channels=1, src bitrate 63999 bps (in 32-320 kbps band), duration 1.000 s, dominant 440.0 Hz in and out, corr(normalized input, written)=0.99999999999999889, clipped_frac=4.5e-05, PCM_24, effective 459.9 kbps. Stereo: read shape (44100,2), sr 44100, src bitrate 127997 bps; written FLAC sr 44100, channels 2, duration 1.000 s, PCM_24, 925.1 kbps, clipped_frac=1.1e-05, ch0 dominant 440.0 Hz, ch1 dominant 660.0 Hz. All finite.
+
+### [09:33:05 UTC] Step 2 — test coherence review of fat_llama/tests/test_feed.py
+Input: fat_llama/tests/test_feed.py (325 lines, 5 tests).
+Action: Read every test and judged whether assertions check audio content vs. mere file existence.
+Reasoning: Rules step 2 — flag tests that only assert a file exists/is non-empty.
+Output: PASS, no edits needed. All 5 tests assert on content: test_read_audio (sr/len/ndim/channels/duration/bitrate band + non-silence, finiteness, 440 Hz dominant peak); test_write_audio (sf.info sr/channels/duration + waveform correlation >0.999, 440 Hz peak, clipped fraction <5%); test_lms_filter_no_extended_warmup_dropout (post-warm-up RMS ratio); test_ist_harmonic_injection_bounded_across_iterations (max|.| bounded vs max_iter); test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate (sample rate formula, duration, finiteness, RMS, clipping, 440 Hz dominant, real-bitrate divergence). Gap found (reported, not fixed - adding a new test method is outside this agent's assertions-only write scope): no test exercises the stereo path (read_audio's (-1,2) reshape, stereo upscale/column_stack), even though the primary input_test.mp3 is stereo.
+
+### [09:48:20 UTC] Step 3 (completed) — Baseline upscale() pipeline result
+Input: background job bf6jm0hve.
+Action: Waited for completion via non-blocking background job + short polls (never a single >10 min foreground call).
+Reasoning: Rules pin the baseline config and forbid shortening max_iterations for runtime.
+Output: ELAPSED_SECONDS=1178.7 (~19.6 min), exit 0. Log shows: MP3 bitrate 192.00 kbps, upscale factor 7, stereo. output_test.flac written: 308700 Hz (=44100*7), 2 ch, PCM_24, 4672878 frames, 15.1373 s, 13872022 bytes, ~7331.9 kbps effective. Peak 1.0 both channels, RMS 0.1948/0.1940, DC 2.3e-06/3.1e-05.
+
+### [09:50:05 UTC] Step 4 — Run the test suite
+Input: fat_llama/tests/test_feed.py.
+Action: `python -m pytest` unavailable (no pytest module in .venv); ran `python -m unittest fat_llama.tests.test_feed -v`.
+Reasoning: Rules step 4 requires running the tests against the produced audio behavior.
+Output: PASS — Ran 5 tests in 8.660s, OK (0 failures/errors). Noted for the coordinator: pytest is not installed in the project venv, so the suite must be run via unittest.
+
+### [09:52:40 UTC] Step 5 — Spectral analysis of output_test.flac
+Input: output_test.flac vs input_test.flac vs a pure 7x zero-order-hold (np.repeat) of the decoded input_test.mp3.
+Action: Ran scratchpad/analyze.py (STFT nperseg=2048/noverlap=1024, 32-band mean-magnitude comparison, clipping/dropout/discontinuity/noise-floor checks) plus a targeted ZOH-baseline comparison script.
+Reasoning: Rules step 5 — look for clipping, dropouts, discontinuities, artifacts, and whether added detail is real.
+Output: Clean on every hygiene check: 0 NaN/Inf; clipping fraction 1.693e-04 in output, identical 1.693e-04 in reference; 0 dropout runs >50 ms in either file; discontinuity 99.9th pct 0.0581817 (out) vs 0.0581818 (ref), ratio 0.999998; noise-floor p10 -145.47 dB in both (rise 0.00 dB - the previously reported +6.12 dB IST noise-floor rise is gone). Band deltas out-vs-ref are 0.00 dB in all 32 bands (0-154.35 kHz).
+ARTIFACT FOUND: the output's entire above-22.05 kHz content is zero-order-hold imaging, not reconstructed detail - spectral images centered at 44.1/88.2/132.3 kHz with nulls at ~22/66/110/154 kHz (the classic 7x sample-and-hold sinc pattern), levels -76 to -136 dB. 99.99% of the output's 7-sample groups are bit-identical internally, and corr(output, pure np.repeat(mp3_samples,7)) = 0.9999999999841 with max abs diff 2.09e-06 - i.e. IST + autoscale + normalize + LMS adaptive filter together change the waveform by <2.1e-06 versus plain sample-and-hold. Root cause candidates for generate-code: (a) IST harmonic amplitude is now 0.1/max_iter = 3.3e-04 and the IST result is added to an unnormalized expanded channel, so its contribution vanishes after peak normalization; (b) lms_filter() is now an exact identity - upscale() calls lms_filter(channel, channel), and with w[0]=1.0 the output y == signal[i] makes the error e identically 0, so the weights never adapt, yet this no-op consumes ~18-19 of the run's 19.6 minutes.
+REFERENCE-DEGENERACY FOUND: input_test.flac is itself a 7x zero-order-hold of input_test.mp3 (corr 0.9999999999999926, max abs diff 2.38e-07, 87.6% of 7-sample groups internally identical), not an independent high-resolution ground truth. Grading against it therefore cannot detect missing added detail.
+
+### [09:54:10 UTC] Step 6 — Coherence score
+Input: aligned mono downmixes of output_test.flac and input_test.flac (both already 308700 Hz, no resampling needed; trimmed to min length 4672878 frames = 15.1373 s).
+Action: Applied the rules' coherence checks and score table.
+Reasoning: Clean on clipping/dropouts/invalid samples/discontinuities, but 0.00 dB delta in every band means no measurable added detail.
+Output: coherence = 8 (table row "8-9: clean on every check, but no clearly measurable added detail").
+
+### [09:55:30 UTC] Step 7 — Spectral deviation score + spectrogram image
+Input: input_test.flac (ref) vs output_test.flac (out).
+Action: Ran the fixed algorithm (mono downmix, float64, common rate 308700, trim to min, STFT 2048/1024, per-spectrogram max normalization, Frobenius spectral convergence + Pearson correlation, averaged x10). Wrote docs/images/spectrogram_comparison.png (two panels, shared color scale vmin=vmax-100 dB, identical x/y limits + ticks + aspect via sharex/sharey and explicit set_xlim/set_ylim/set_xticks/set_yticks).
+Reasoning: Rules step 4/Scoring section; new requirement that both panels share one zoom level.
+Output: spectral_convergence=1.0000, correlation=1.0000, combined=1.0000, deviation_score=10.0. Image written, 722809 bytes. Caveat recorded: the 10.0 is degenerate because the reference is itself a ZOH of the same MP3 (see step 5).
+
+### [09:56:00 UTC] DONE — Baseline run clean on all hygiene checks (coherence 8, spectral deviation 10.0 - the latter degenerate), 5/5 tests pass; flagged that the pipeline output is indistinguishable from a plain 7x sample-and-hold, that lms_filter() is now an exact no-op costing ~19 min, and that input_test.flac is not an independent reference.

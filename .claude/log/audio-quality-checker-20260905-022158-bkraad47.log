@@ -1,0 +1,25 @@
+# audio-quality-checker run log
+# invocation-time: 20260905-022158 UTC
+# user: bkraad47
+# repo: fat_llama, branch v-1.4.0-latest
+
+### [02:22:10 UTC] Step 1 — Exercise read_audio/write_audio on synthesized sample
+Input: fat_llama/audio_fattener/feed.py read_audio/write_audio; synthesized 1s 440 Hz Sine mp3 (pydub.generators.Sine pattern from test_feed.py).
+Action: Wrote+ran scratchpad/step1_rw.py under .venv/Scripts/python.exe; inspected output with soundfile.info/read and mutagen.flac.FLAC; measured dominant frequency and tone purity in/out; also exercised the 'wav' branch.
+Reasoning: Need measured bitrate/sample-rate/channel/duration properties plus content sanity before scoring anything.
+Output: Input mp3 -> sr=44100, mono, 1000ms, bitrate=63999, samples on raw PCM scale (min -31212, max 31145, rms 22011).
+Output flac -> sr=44100 (preserved), channels=1 (preserved), duration=1.0s (matches), subtype PCM_24, flac bitrate 938384 bps, no NaN/Inf.
+FAIL: clipped_fraction = 0.99993 (99.99% of samples at full scale); data_rms=0.99997. tone_purity 0.99999 in -> 0.81066 out (= 8/pi^2, the exact square-wave fundamental fraction) => sine was squared off. Same for the 'wav' branch (clipped 0.99993). Dominant freq 440 Hz preserved in both.
+Root cause: read_audio returns raw integer-PCM-scale float64; write_audio passes it straight to sf.write(..., subtype='PCM_24'), and soundfile interprets float input as [-1,1] full scale, clamping everything.
+
+### [02:24:05 UTC] Step 2/3 — Review test_feed.py coherence and fix assertions
+Input: fat_llama/tests/test_feed.py (2 tests: test_read_audio, test_write_audio).
+Action: Reviewed both tests. Strengthened test_read_audio assertions in place (added channels/ndim/duration checks, replaced hard-coded bitrate==63999 magic number with a 32k-320k CBR band, added finite-sample + non-silence + dominant-frequency==440Hz content assertions). Left test_write_audio as-is; left feed.py untouched.
+Reasoning: test_read_audio asserted only shape/metadata and never that the samples carried the 440 Hz tone, and pinned an ffmpeg/LAME-build-dependent bitrate constant. test_write_audio was already coherent (asserts sample rate, channels, duration, non-silence, clipping fraction) and its failure is a genuine production bug, not an incoherent assertion, so per the fixing philosophy it is reported not "fixed".
+Output: PASS test_read_audio (with new content assertions). FAIL test_write_audio -> clipped_fraction 0.99993 not < 0.05. Remaining findings to report, not fix: new_interpolation_algorithm imported but never exercised; unittest.mock patch/MagicMock imported unused; no test covers upscale() end-to-end; ResourceWarning unclosed file in create_test_mp3.
+
+### [02:24:20 UTC] Step 4 — Run tests and inspect audio output properties
+Input: fat_llama/tests/test_feed.py; synthesized-sample output from Step 1.
+Action: Ran `.venv/Scripts/python.exe -m unittest fat_llama.tests.test_feed -v` (pytest not installed in .venv). Cross-checked the produced flac/wav properties from Step 1.
+Reasoning: Cannot literally listen; substituted measured signal properties (bitrate, sample rate, channels, duration, clipping, dominant frequency, tone purity) for listening.
+Output: 1 pass / 1 fail. Audio properties: sample rate 44100 preserved, channels 1 preserved, duration 1.000s vs 1.000s input (within tolerance), FLAC 24-bit @ 938 kbps. Quality issue: full-scale clipping of 99.99% of samples turns the 440 Hz sine into a square wave (tone purity 0.811 == 8/pi^2), i.e. severe harmonic distortion on the direct read_audio->write_audio path.

@@ -23,7 +23,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install numpy
-        pip install cupy-cuda12x
+        pip install cupy-cuda13x
         pip install pydub
         pip install soundfile
         pip install mutagen
