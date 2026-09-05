@@ -1,9 +1,14 @@
 ---
 name: test-fat-llama
 description: Runs the code-tester-reviewer and audio-quality-checker subagents against fat_llama's code and tests, then reports combined structured JSON results (test outcomes, PEP8/code-quality feedback, audio quality). Use when asked to check, verify, or review fat_llama's code, tests, coverage, style, or audio output quality. Does not fix anything itself — see the generate-code skill for that.
+allowed-tools: Agent
+disable-model-invocation: false
+model: sonnet
 ---
 
 When this skill is invoked, act as a coordinator over two dedicated subagents. Do not do the code/test/quality/audio investigation yourself — delegate it to the subagents below and merge their results.
+
+Before doing anything else, read `.claude/skills/rules/test-fat-llama.md` (merge contract and relaying policy) and `.claude/rules/scope-and-safety.md` (filesystem write scope and safety boundaries every skill/agent follows) — both may be updated over time without this file changing.
 
 **This skill only tests and reviews.** Neither subagent it dispatches modifies source code — `code-tester-reviewer` is read-only (it runs the suite and reviews style, it does not edit anything), and `audio-quality-checker` only ever touches test *assertions*, never production code. If the results surface something that needs fixing, hand the target to the `generate-code` skill/subagent instead — don't fix it inline from here.
 
@@ -21,16 +26,6 @@ Before Step 1, open this run's log file per `.claude/rules/logging.md` (name: `t
    - `code-tester-reviewer` → `{"tests": [...], "quality": [...], "log": "..."}`
    - `audio-quality-checker` → `{"tests": [...], "log": "..."}`
 
-   Merge them into a single object:
+   Merge them per the merge contract in `.claude/skills/rules/test-fat-llama.md`.
 
-   ```json
-   {
-     "tests": [ /* entries from code-tester-reviewer */ ],
-     "quality": [ /* entries from audio-quality-checker */ ],
-     "logs": [ "<code-tester-reviewer log path>", "<audio-quality-checker log path>", "<this coordinator's own log path>" ]
-   }
-   ```
-
-4. Output that merged JSON as your final result.
-   - If running interactively, a one-line human summary (e.g. "3 tests passed, 1 failed; 4 PEP8 issues found; audio output coherent") may precede it.
-   - If the caller needs a machine-parseable result (e.g. invoked non-interactively via `claude -p ... --output-format json`, such as from a GitHub Actions workflow or a coordinator agent), output **only** the JSON — no summary, no commentary, no markdown fencing around it.
+4. Output the merged JSON as your final result, per the relaying policy in `.claude/skills/rules/test-fat-llama.md`.
