@@ -153,3 +153,17 @@ Reasoning: This is exactly the kind of process-correctness ambiguity worth surfa
 Output: Loop terminates now. C_4 (commit 45165f4, tag iterate-fat-llama/20260905-030218/iter-4) is the final result -- no rollback needed since C_4 already is the best-scoring candidate found. Updated README.md with cycle 5's (more complete/final) test results for C_4 per the test-fat-llama dispatch above. Proceeding to Step 5 (docs and changelog) with C_4 as the shipped state.
 
 Final score table: (1, 0.667 pre-methodology-fix), (2, 0.714 pre-methodology-fix), (3, 0.538 post-methodology-fix, first real-audio-quality cycle), (4, 0.667), (5, 0.8333 -- best, evaluates C_4, the kept candidate). No rollback: C_4 is both the last committed cycle and the best-scoring one.
+
+### [21:00:00 UTC] Step 5 — Docs and changelog
+Action: review-current-state run (log .claude/log/review-current-state-20260905-210007-bkraad47.log) against the final chosen tree. Created CHANGELOG.md at repo root with a single dated entry (version filled in below), one bullet per kept fix across cycles 1-4 (write_audio clipping, LMS no-op, IST harmonic scale, interpolation imaging, Nyquist cutoff), plus notes on remaining gaps (stereo coverage, no new in-band detail, reference-file independence) and a process note on the cycle-5 loop-mechanics quirk. Reviewed holistically for clarity/tone -- written as human-readable prose, not a JSON field dump.
+Output: CHANGELOG.md created.
+
+### [21:00:00 UTC] Step 6 — Version bump
+Action: Read setup.py's current version: 1.1.0 (already flagged in CURRENT_STATE.md's Notes as mismatched with the branch name v-1.4.0-latest -- a pre-existing inconsistency, not something this run caused). DIRECTIVES ("Update audio to have better quality") reads as a quality-improvement request per the version-bump policy, not an explicit ask for new functionality, so applied the default: patch bump. Updated setup.py's version to 1.1.1 and filled it into CHANGELOG.md's entry heading.
+Output: setup.py version = 1.1.1 (initial choice: patch bump default, since DIRECTIVES read as a quality-improvement request not an explicit ask for new functionality). Flagged in Step 7's pre-confirmation summary to the user, including the pre-existing version/branch-name mismatch (setup.py said 1.1.0 while the branch is named v-1.4.0-latest).
+
+### [21:15:00 UTC] Step 7 — User override on version number
+Input: User responded to the Step 7 summary: "no new version is 1.4.0" -- overriding the default patch-bump choice.
+Action: Updated setup.py's version to 1.4.0 (matching the branch name's intended release) and CHANGELOG.md's entry heading to [1.4.0].
+Reasoning: Explicit user instruction supersedes the default version-bump policy; the branch name v-1.4.0-latest was itself evidence the intended release version was always 1.4.0, consistent with the pre-existing version/branch-name mismatch flagged in CURRENT_STATE.md's Notes.
+Output: setup.py version = 1.4.0, CHANGELOG.md entry = [1.4.0]. Awaiting final confirmation before remote actions.

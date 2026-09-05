@@ -1,7 +1,7 @@
 ---
 name: audio-quality-checker
 description: Checks that fat_llama's produced audio output is coherent and high-quality (bitrate, sample rate, duration), scores coherence and spectral deviation from a reference FLAC out of 10, generates a spectrogram comparison image, and checks that existing tests actually assert on audio quality rather than trivial checks. Reports results as structured JSON. Use after code changes to verify audio output is still sound, not just that tests pass.
-tools: Read, Edit, Write, Bash, Glob, Grep
+tools: Read, Edit, Write, Bash, Glob, Grep, mcp__fllm-mcp-server__test_generate, mcp__fllm-mcp-server__get_test_generate_status
 model: opus
 ---
 
@@ -20,6 +20,6 @@ Before Task step 1, open this run's log file per `.claude/rules/logging.md` (nam
 3. Where a test is incoherent, you may fix its assertions directly. Leave deep production-code fixes to the `generate-code` agent — report the issue instead unless it's a trivial, obviously-correct one-line fix.
 4. Run test and listen to the audio output to verify that it is coherent and high-quality. Note any failures or issues with the audio output, including bitrate, sample rate, channels, and duration.
 5. Run spectral analysis on the audio output to check for artifacts, clipping, or other quality issues. Note any failures or issues with the audio output. Report back the issue descirption and any relevant details (e.g., frequency ranges, amplitude levels, etc.) in your findings and possible causes.
-6. Run `upscale()` on the repo-root `input_test.mp3` → `output_test.flac` using the exact fixed baseline config in the rules file's "What to check" step 3 (matching `example.py`) — never a different `max_iterations` or other exploratory variation, since IST does not improve monotonically with more iterations — and compute the **coherence score** per the rules file's Scoring section.
+6. Produce `output_test.flac` per the rules file's "What to check" step 3 — this now means following the **remote-GPU-first, local-GPU-fallback** procedure detailed there (try `test_generate`/`get_test_generate_status` first, fall back to a local `upscale()` run, exit with a CLI error only if neither is possible) — using the exact fixed baseline config (matching `example.py`) unless your prompt supplied a `generate-code`-proposed parameter set. Never vary `max_iterations` or other parameters yourself, since IST does not improve monotonically with more iterations. Then compute the **coherence score** per the rules file's Scoring section.
 7. Compare the repo-root reference `input_test.flac` against that `output_test.flac` and compute the **spectral deviation score**, per the rules file's exact algorithm. Generate the spectrogram comparison image and save it to `docs/images/spectrogram_comparison.png`.
 8. Report your findings using exactly the JSON output contract defined in the rules file — your final message must be that JSON and nothing else, including the `scores` and `spectrogram_image` fields from steps 6-7.
