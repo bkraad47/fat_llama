@@ -1,6 +1,7 @@
 import unittest
 import numpy as np
 import os
+import soundfile as sf
 from unittest.mock import patch, MagicMock
 from fat_llama.audio_fattener.feed import (
     read_audio, write_audio, new_interpolation_algorithm
@@ -35,9 +36,36 @@ class TestAudioFattener(unittest.TestCase):
         sample_rate, samples, bitrate, audio = read_audio(self.test_mp3_file, format='mp3')
         output_file = 'test_output.flac'
         write_audio(output_file, sample_rate, samples, format='flac')
-        self.assertTrue(os.path.exists(output_file))
-        if os.path.exists(output_file):
-            os.remove(output_file)
+        try:
+            self.assertTrue(os.path.exists(output_file))
+
+            info = sf.info(output_file)
+            # Sample rate and channel count must be preserved by the round trip.
+            self.assertEqual(info.samplerate, sample_rate)
+            self.assertEqual(info.channels, audio.channels)
+            # Duration must match the ~1 second input within a small tolerance.
+            self.assertAlmostEqual(info.duration, len(audio) / 1000.0, delta=0.05)
+
+            written_data, written_sr = sf.read(output_file)
+            self.assertEqual(written_sr, sample_rate)
+            # The written audio must not be silence.
+            self.assertGreater(np.max(np.abs(written_data)), 0.0)
+            # The written audio must not be catastrophically clipped: write_audio()
+            # is documented to accept the samples produced by read_audio(), whose
+            # magnitude is on the raw PCM scale (tens of thousands), not normalized
+            # to [-1, 1]. If write_audio() fails to normalize/scale before handing
+            # data to soundfile with an integer subtype, nearly every sample gets
+            # clamped to full scale, destroying the waveform.
+            clipped_fraction = np.mean(np.abs(written_data) > 0.999)
+            self.assertLess(
+                clipped_fraction, 0.05,
+                f"{clipped_fraction:.2%} of written samples are clipped to full scale; "
+                "write_audio() likely wrote un-normalized/out-of-range data directly "
+                "with an integer subtype instead of scaling it to [-1, 1] first."
+            )
+        finally:
+            if os.path.exists(output_file):
+                os.remove(output_file)
 
 if __name__ == '__main__':
     unittest.main()

@@ -36,6 +36,7 @@ Your final message must be *only* this JSON — no prose before or after it:
 
 ## Reporting philosophy
 
+- Per `.claude/rules/project-mission.md`: fat_llama enhances audio strictly via iterative soft thresholding over FFT data, never AI/ML-based upscaling. If a change under review introduces a trained/learned-model dependency as part of how audio is enhanced, flag it as a quality finding regardless of whether it passes tests.
 - Report the root cause of a test failure, not just which assertion tripped — read the source, not just the traceback.
 - Don't weaken, skip, or reinterpret a failing test to make your report look better — a failing test is a finding, not a problem to route around.
 - Don't install new dependencies or add lint/coverage tooling unprompted; if coverage tooling (`coverage`, `pytest-cov`) isn't installed, note that and skip coverage rather than modifying `requirements.txt`/`setup.py`.

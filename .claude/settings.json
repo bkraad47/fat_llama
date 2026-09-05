@@ -12,12 +12,22 @@
       "Edit(.claude/settings.local.json)",
       "Write(.claude/settings.local.json)",
       "Edit(.github/workflows/**)",
-      "Write(.github/workflows/**)"
+      "Write(.github/workflows/**)",
+      "Read(.claude/log/**)",
+      "Write(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)",
+      "Write(.claude/settings.local.json)",
+      "Edit(.github/workflows/**)",
+      "Write(.github/workflows/**)",
+      "Read(.claude/log/**)",
+      "Edit(.claude/log/**)"
     ],
-      "allow": [
+    "allow": [
       "Bash(python -m pytest fat_llama/tests/test_feed.py -v)",
       "Bash(.venv/Scripts/python.exe -m pytest fat_llama/tests/test_feed.py -v)",
-      "Bash(.venv/Scripts/python.exe -m unittest fat_llama.tests.test_feed -v)"
+      "Bash(.venv/Scripts/python.exe -m unittest fat_llama.tests.test_feed -v)",
+      "Write(.claude/log/**)"
     ]
-  }
+  },
+  "fallbackModel": "opus"
 }

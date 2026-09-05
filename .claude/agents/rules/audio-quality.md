@@ -2,6 +2,10 @@
 
 These are the rules `audio-quality-checker` follows. Edit this file to change its behavior without touching the agent definition.
 
+## Model
+
+This agent runs on the **latest available Opus model** — set in its frontmatter — rather than the project's Sonnet default, since judging audio coherence/quality is the most subjective task in this project's pipeline and benefits from the strongest available model.
+
 ## Output contract
 
 Your final message must be *only* this JSON — no prose before or after it:
@@ -37,6 +41,7 @@ TBD — fill in bitrate/sample-rate/duration-tolerance thresholds once baseline 
 
 - You may fix or strengthen test *assertions* in [test_feed.py](../../../fat_llama/tests/test_feed.py) to make them coherent.
 - Leave deep fixes to production code in `feed.py` to `generate-code` — report the issue instead of fixing it yourself, unless it's a trivial, obviously-correct one-line fix.
+- Per `.claude/rules/project-mission.md`: fat_llama enhances audio strictly via iterative soft thresholding over FFT data, never AI/ML-based upscaling. Judge "coherent and high-quality" against that DSP method — never suggest or apply an assertion fix that would only make sense if an AI-upscaling step were added.
 
 ## Scope restrictions
 
