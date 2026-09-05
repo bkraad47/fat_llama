@@ -40,7 +40,7 @@ jobs:
 
       - name: Checkout issue branch
         if: steps.guard.outputs.proceed == 'true'
-        uses: actions/checkout@v2
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.ref }}
           fetch-depth: 0
@@ -58,7 +58,7 @@ jobs:
 
       - name: Set up Python
         if: steps.guard.outputs.proceed == 'true'
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
