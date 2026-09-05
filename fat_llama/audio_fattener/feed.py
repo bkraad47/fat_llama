@@ -160,6 +160,21 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     cp.ndarray: The processed audio data after IST.
     """
     data_thres = initialize_ist(data, threshold)
+
+    # The harmonic reconstruction term below is added to data_thres every
+    # iteration, and data_thres carries forward from one iteration to the
+    # next. Its FFT magnitude scales with array length, so it trivially
+    # survives the fixed absolute `threshold` and is never removed by
+    # masking -- left at a fixed per-iteration amplitude, its contribution
+    # to the output would accumulate roughly linearly with max_iter instead
+    # of converging (measured: max|output| grew from ~0.88 at max_iter=1 to
+    # ~30.8 at max_iter=300, an unbounded, iteration-count-dependent rise).
+    # Scaling by 1/max_iter keeps the *total* injected harmonic energy
+    # constant regardless of how many iterations run -- identical behavior
+    # to before at max_iter=1, but no longer scaling with iteration count --
+    # without changing the FFT/IST method itself.
+    harmonic_amplitude = 0.1 / max_iter
+
     for _ in range(max_iter):
         data_fft = cp.fft.fft(data_thres)
         mask = cp.abs(data_fft) > threshold
@@ -168,7 +183,7 @@ def iterative_soft_thresholding(data, max_iter, threshold):
 
         # Harmonic reconstruction
         harmonics = cp.sin(cp.linspace(0, 2 * cp.pi, len(data_thres)))
-        data_thres += 0.1 * harmonics
+        data_thres += harmonic_amplitude * harmonics
 
     return data_thres
 
@@ -295,8 +310,16 @@ def upscale(
         (e.g., 'flac', 'wav').
     max_iterations (int): Maximum number of iterations for IST.
     threshold_value (float): Threshold value for IST.
-    target_bitrate_kbps (int): Target bitrate in kbps (must be within
-        valid range for the target format).
+    target_bitrate_kbps (int): Used only to derive the interpolation
+        upscale_factor relative to the source file's own bitrate
+        (upscale_factor = round(target_bitrate_kbps * 1000 / source
+        bitrate)); must itself fall within the valid range for the
+        target format (a sanity bound on this parameter, chosen to keep
+        the derived upscale_factor reasonable). This is NOT a promise
+        about the produced file's real bitrate: the output is always
+        written as uncompressed PCM (see write_audio) at an upsampled
+        sample rate, so its actual bitrate will be substantially higher
+        than target_bitrate_kbps by design once upscale_factor > 1.
     toggle_normalize (bool): Whether to normalize the audio. Defaults to
         True.
     toggle_autoscale (bool): Whether to autoscale the audio based on the
@@ -304,7 +327,9 @@ def upscale(
     toggle_adaptive_filter (bool): Whether to apply adaptive filtering.
         Defaults to True.
     """
-    # Validate target bitrate
+    # Validate target_bitrate_kbps itself (the upscale_factor-derivation
+    # knob below), not the eventual output file's real bitrate -- see the
+    # target_bitrate_kbps docstring above for why those are different.
     valid_bitrate_ranges = {
         'flac': (800, 1411),
         'wav': (800, 6444),
@@ -322,14 +347,14 @@ def upscale(
         )
 
     # Read the input audio file
-    logger.info(f"Loading {source_format.upper()} file...")
+    logger.info("Loading %s file...", source_format.upper())
     sample_rate, samples, bitrate, audio = read_audio(
         input_file_path, audio_format=source_format
     )
     if bitrate:
         logger.info(
-            f"Original {source_format.upper()} bitrate: "
-            f"{bitrate / 1000:.2f} kbps"
+            "Original %s bitrate: %.2f kbps",
+            source_format.upper(), bitrate / 1000
         )
 
     samples = cp.array(samples, dtype=cp.float64)
@@ -339,7 +364,7 @@ def upscale(
     # Determine the upscale factor
     target_bitrate = target_bitrate_kbps * 1000
     upscale_factor = round(target_bitrate / bitrate) if bitrate else 4
-    logger.info(f"Upscale factor set to: {upscale_factor}")
+    logger.info("Upscale factor set to: %s", upscale_factor)
 
     # Process and upscale the audio channels
     if samples.ndim == 1:
@@ -411,5 +436,6 @@ def upscale(
         audio_format=target_format
     )
     logger.info(
-        f"Saved processed {target_format.upper()} file at {output_file_path}"
+        "Saved processed %s file at %s",
+        target_format.upper(), output_file_path
     )
