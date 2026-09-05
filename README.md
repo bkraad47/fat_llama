@@ -6,8 +6,8 @@ fat_llama is a Python package for upscaling audio files to FLAC or WAV formats u
 ## Features
 
 - Upscale MP3 files to high-quality FLAC format.
-- Iterative soft thresholding (IST) for enhanced audio processing.
-- Auto-scaling amplitude adjustment and normalization.
+- Band-limited (FFT-domain) interpolation and iterative soft thresholding (IST) for enhanced audio processing, with no bandwidth extension beyond the original recording's frequency ceiling.
+- LMS adaptive filtering, auto-scaling amplitude adjustment, and normalization.
 - Supports GPU-accelerated processing with CuPy.
 - Claude is used for coding and maintainance of this package, but not for generating audio.
 
@@ -70,11 +70,12 @@ upscale(
 - `output_file_path (str)`: Path to the output processed audio file. Mandatory.
 - `source_format (str)`: Format of the input audio file (e.g., 'mp3', 'wav', 'ogg', 'flac').
 - `target_format (str)`: Format of the output audio file (e.g., 'flac', 'wav'). Default is 'flac'.
-- `max_iterations (int)`: Maximum number of iterations for IST. Default is 800.
+- `max_iterations (int)`: Maximum number of iterations for IST. Default is 300.
 - `threshold_value (float)`: Threshold value for IST. Default is 0.6.
-- `target_bitrate_kbps (int)`: Target bitrate in kbps. Default is 1411.
+- `target_bitrate_kbps (int)`: Used to derive the upscale factor relative to the source file's own bitrate; must fall within the valid range for `target_format` (800-1411 kbps for `flac`, 800-6444 kbps for `wav`). Default is 1411. Note this is not a promise about the output file's real bitrate — the output is always written as uncompressed PCM at an upsampled sample rate, so its actual bitrate will be substantially higher.
 - `toggle_normalize (bool)`: Whether to normalize the audio. Default True.
 - `toggle_autoscale (bool)`: Whether to autoscale the audio based on the original audio. Default True.
+- `toggle_adaptive_filter (bool)`: Whether to apply LMS adaptive filtering. Default True.
 
 ## Running the Example
 
@@ -129,7 +130,20 @@ ericzo - beyond link(https://soundcloud.com/ericzomusic/free-electro-trap-anthem
 
 ## Changelog
 
-All notable changes to this project will be documented in this file.
+The full, current changelog is maintained in [CHANGELOG.md](CHANGELOG.md) — see it for the latest entries going forward. The history below is kept for reference.
+
+### [1.4.0] - 2026-09-06
+
+#### Fixed
+
+- `write_audio()` was clipping nearly all output audio (missing normalization before writing PCM).
+- The LMS "adaptive filter" was a silent no-op that burned most of the pipeline's runtime for zero effect.
+- IST's harmonic-reconstruction term was swamped to invisibility at real audio scale.
+- Interpolation used naive sample duplication, causing audible imaging artifacts; replaced with proper band-limited (FFT-based) interpolation — also roughly 1000x faster.
+- Added an unconditional final filter guaranteeing no output content exceeds the original recording's frequency ceiling — upscaling improves precision/headroom within the original bandwidth, it does not extend it.
+- Fixed CI: GitHub's hosted runners have no GPU, so CUDA-dependent tests now skip cleanly there instead of crashing; fixed a stale `cupy-cuda12x`/`cupy-cuda13x` version mismatch in the test workflow.
+
+See [CHANGELOG.md](CHANGELOG.md) for full details, including known gaps and measured audio-quality improvements.
 
 ### [1.1.0] - 2024-08-01
 
