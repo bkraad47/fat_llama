@@ -1,10 +1,11 @@
 import unittest
 import numpy as np
+import cupy as cp
 import os
 import soundfile as sf
 from unittest.mock import patch, MagicMock
 from fat_llama.audio_fattener.feed import (
-    read_audio, write_audio, new_interpolation_algorithm
+    read_audio, write_audio, new_interpolation_algorithm, lms_filter
 )
 
 class TestAudioFattener(unittest.TestCase):
@@ -27,7 +28,9 @@ class TestAudioFattener(unittest.TestCase):
         sine_wave.export(filename, format="mp3")
 
     def test_read_audio(self):
-        sample_rate, samples, bitrate, audio = read_audio(self.test_mp3_file, format='mp3')
+        sample_rate, samples, bitrate, audio = read_audio(
+            self.test_mp3_file, audio_format='mp3'
+        )
         self.assertEqual(sample_rate, 44100)  # Default sample rate for the generated sine wave
         self.assertEqual(len(samples), 44100)  # 1 second of audio at 44100 Hz
         # A mono source must come back as a flat 1-D array, not an (N, 2) reshape.
@@ -51,9 +54,11 @@ class TestAudioFattener(unittest.TestCase):
         self.assertAlmostEqual(dominant_freq, 440.0, delta=5.0)
 
     def test_write_audio(self):
-        sample_rate, samples, bitrate, audio = read_audio(self.test_mp3_file, format='mp3')
+        sample_rate, samples, bitrate, audio = read_audio(
+            self.test_mp3_file, audio_format='mp3'
+        )
         output_file = 'test_output.flac'
-        write_audio(output_file, sample_rate, samples, format='flac')
+        write_audio(output_file, sample_rate, samples, audio_format='flac')
         try:
             self.assertTrue(os.path.exists(output_file))
 
@@ -84,6 +89,40 @@ class TestAudioFattener(unittest.TestCase):
         finally:
             if os.path.exists(output_file):
                 os.remove(output_file)
+
+    def test_lms_filter_no_extended_warmup_dropout(self):
+        # Regression test: lms_filter() used to zero-initialize both its
+        # tap weights and its output buffer for the first num_taps samples,
+        # causing the filtered signal to ramp up from near-silence over many
+        # samples before tracking the actual input (observed in production
+        # as a ~200ms, -82 dBFS dropout at the head of upscaled audio with
+        # no corresponding silence in the source). upscale() calls
+        # lms_filter(channel, channel, ...) -- signal and desired are the
+        # same array -- so a properly warmed-up filter should already be
+        # tracking the input's magnitude immediately past the initial taps,
+        # not ramping up from zero.
+        sr = 44100
+        num_taps = 32
+        t = cp.linspace(0, 0.05, int(sr * 0.05), endpoint=False)
+        signal = 0.5 * cp.sin(2 * cp.pi * 300 * t) + 0.2 * cp.sin(2 * cp.pi * 900 * t)
+
+        filtered = lms_filter(signal, signal, mu=0.001, num_taps=num_taps)
+
+        signal_np = cp.asnumpy(signal)
+        filtered_np = cp.asnumpy(filtered)
+
+        early_filtered = filtered_np[num_taps:num_taps + 50]
+        early_signal = signal_np[num_taps:num_taps + 50]
+        early_filtered_rms = np.sqrt(np.mean(early_filtered ** 2))
+        early_signal_rms = np.sqrt(np.mean(early_signal ** 2))
+
+        self.assertGreater(
+            early_filtered_rms / early_signal_rms, 0.5,
+            f"Filtered output RMS immediately after warm-up ({early_filtered_rms:.4f}) "
+            f"is far below the input's own RMS in that same window ({early_signal_rms:.4f}); "
+            "lms_filter() is likely ramping up from a zero-initialized state instead "
+            "of tracking the signal from (near) the first sample."
+        )
 
 if __name__ == '__main__':
     unittest.main()

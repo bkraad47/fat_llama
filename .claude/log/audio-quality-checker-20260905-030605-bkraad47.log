@@ -1,0 +1,28 @@
+# audio-quality-checker run 20260905-030605 (bkraad47)
+
+### [03:06:05 UTC] Step 0 — Setup
+Input: Task from test-fat-llama coordinator; rules at .claude/agents/rules/audio-quality.md, .claude/rules/scope-and-safety.md.
+Action: Read both rules files, fat_llama/audio_fattener/feed.py, fat_llama/tests/test_feed.py, example.py. Opened this log.
+Reasoning: Establish output contract, scoring algorithm and write scope before touching anything.
+Output: Log opened. Write scope confirmed: test assertions under fat_llama/tests/**, docs/images/spectrogram_comparison.png, throwaway scripts in scratchpad.
+
+### [03:07:30 UTC] Step 1 — read_audio/write_audio on synthesized sample
+Input: pydub Sine(440) 1s mono mp3 + Sine(440)/Sine(660) 1s stereo mp3, written to scratchpad.
+Action: Ran scratchpad/step1_roundtrip.py exercising read_audio() (mono+stereo mp3) and write_audio() (flac mono, wav stereo, unsupported-format branch, pre-normalized data).
+Reasoning: Verify bitrate/sample-rate/channels/duration are preserved and that written audio carries real content.
+Output: read_audio mono: sr=44100, 44100 samples, ndim=1, ch=1, dur=1000ms, bitrate=63999 (64.0 kbps), dominant freq 440.0 Hz, all finite. Stereo: sr=44100, shape (44100,2), bitrate=127997. write_audio flac: sr=44100, ch=1, dur=1.000s, PCM_24, ~939 kbps effective, dominant freq 440.0 Hz preserved.
+  FAILURE: clipped fraction 99.99% (mono flac) and 99.99% (stereo wav). write_audio() passes read_audio()'s raw PCM-scale floats (peak 31212.0) straight to sf.write() with subtype PCM_24, which interprets float input as [-1,1] => everything clamps to full scale. Writing pre-normalized data gives clipped fraction 4.5e-05, confirming the cause is missing scaling in write_audio(), not soundfile.
+  write_audio('...mp3') correctly raises ValueError: Unsupported target format: mp3.
+
+### [03:08:10 UTC] Step 2/3 — test coherence review + fixes
+Input: fat_llama/tests/test_feed.py (2 tests), unittest run.
+Action: Reviewed assertions; ran `python -m unittest fat_llama.tests.test_feed -v`.
+Reasoning: Determine whether assertions meaningfully check audio content vs. mere file existence, and whether any failure is a bad assertion (mine to fix) or a production bug (generate-code's).
+Output: test_read_audio PASS - assertions are coherent (sr, sample count, ndim/mono shape, duration, bitrate band, finiteness, FFT dominant-freq 440Hz). test_write_audio FAIL - assertions are ALSO coherent (checks samplerate/channels/duration/non-silence/clipping via sf.info+sf.read, not mere existence); it fails because of the real write_audio() scaling bug above (clipped fraction 0.99993 vs <0.05 threshold). NO assertion edits made - weakening this assertion would hide a genuine defect. Reported to generate-code instead.
+Coverage gaps noted (reported, not fixed - out of assertion scope): new_interpolation_algorithm is imported but never exercised; unittest.mock patch/MagicMock imported unused; no tests at all for iterative_soft_thresholding, initialize_ist, lms_filter, normalize_signal, upscale_channels, or upscale().
+
+### [03:09:00 UTC] Step 4/6 — upscale() pipeline run
+Input: input_test.mp3 (192 kbps, 44100 Hz, stereo, 15.137 s) -> output_test.flac, params from example.py (max_iterations=300, threshold=0.6, target 1400 kbps, all toggles on).
+Action: Launched `python -u example.py` in background.
+Reasoning: Step 3 of rules "What to check" requires scoring the real example pipeline output, not a synthetic one.
+Output: pending (see next entry). Derived upscale_factor = round(1400000/192000) = 7 -> expected output rate 308700 Hz.

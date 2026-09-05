@@ -39,7 +39,26 @@ Your final message must be *only* this JSON — no prose before or after it:
    - sample rate / channel count preserved or upsampled as intended
    - duration matches the input (within a small tolerance)
 2. **Test coherence** — review [test_feed.py](../../../fat_llama/tests/test_feed.py) and flag any test that doesn't meaningfully assert on audio content (e.g. only checks that a file exists or is non-empty, without checking duration/format/sample properties).
-3. **Coherence score** — run the actual example pipeline (`upscale()` from `feed.py` with `input_file_path='input_test.mp3'`, `output_file_path='output_test.flac'`, matching `example.py`'s call at the repo root) and score the result per **Scoring → Coherence score** below.
+3. **Coherence score** — run the actual example pipeline and score the result per **Scoring → Coherence score** below, using exactly this fixed baseline config (the same call `example.py` makes at the repo root) — never a higher `max_iterations` or any other exploratory variation:
+
+   ```python
+   upscale(
+       input_file_path='input_test.mp3',
+       output_file_path='output_test.flac',
+       source_format='mp3',
+       target_format='flac',
+       max_iterations=300,
+       threshold_value=0.6,
+       target_bitrate_kbps=1400,
+       toggle_normalize=True,
+       toggle_autoscale=True,
+       toggle_adaptive_filter=True
+   )
+   ```
+
+   **Why this is pinned:** IST's harmonic-reconstruction term (`iterative_soft_thresholding` in `feed.py`) adds a small sinusoid every iteration without bound, so it does not monotonically improve with more iterations — past a certain point, more iterations makes output *worse*, not better. Do not vary `max_iterations` (or any other parameter) searching for a "best" score, and do not increase it if a run seems to be taking a long time — the qualitative assessment is only meaningful when every run uses this identical, comparable baseline. If a run is slow, that is expected — let it finish rather than reducing iterations to speed it up.
+
+   **How to run it without being killed:** this baseline run takes roughly 20 minutes end to end on the reference GPU — measured breakdown: `read_audio` ~0s, interpolation+IST (both channels, 300 iterations) ~105s, normalize ~0s, LMS adaptive filter alone ~9-10 minutes *per channel* (~18-19 min for both) — because `lms_filter` in `feed.py` is a plain per-sample Python loop, not a vectorized op. That means IST/`max_iterations` is *not* the lever for runtime (it's only ~1.75 min of the total); do not shorten it to fit a time budget. Instead, never run this call as a single blocking foreground command — a single Bash tool call (including one that blocks via a manual `sleep`/poll loop) is capped at 10 minutes and will be killed before a ~20 minute run finishes. Launch it as a background command (`run_in_background: true` on the Bash tool, writing to a script that itself calls `upscale(...)` and then something detectable like printing `DONE` at the end) and wait for its own completion notification rather than polling in a blocking loop.
 4. **Spectral deviation score** — compare the repo-root reference `input_test.flac` against the `output_test.flac` produced in step 3, and generate the comparison image, per **Scoring → Spectral deviation score** below.
 
 ## Acceptable ranges

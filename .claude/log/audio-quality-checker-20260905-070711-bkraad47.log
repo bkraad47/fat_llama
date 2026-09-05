@@ -1,0 +1,54 @@
+# audio-quality-checker run log
+Invocation: 20260905-070711 UTC
+User: bkraad47
+Repo: C:/Users/bulkg/OneDrive/Documents/Projects/fat_llama
+Branch: v-1.4.0-latest
+
+### [07:07:11 UTC] Step 0 — Setup
+Input: Task from test-fat-llama coordinator; rules .claude/agents/rules/audio-quality.md, .claude/rules/scope-and-safety.md.
+Action: Read both rules files, fat_llama/audio_fattener/feed.py, fat_llama/tests/test_feed.py, example.py. Verified env: cupy 14.2.0 on NVIDIA GeForce RTX 4050 Laptop GPU; soundfile/scipy/matplotlib present. Confirmed input_test.mp3 (364922 B) and input_test.flac (10016973 B) exist at repo root.
+Reasoning: Need to ground in rules + confirm CUDA path available before running the pinned baseline upscale.
+Output: Environment OK, CUDA available, log file opened.
+
+### [07:09:30 UTC] Step 6 (launched early) — Pinned baseline upscale dispatched in background
+Input: input_test.mp3 -> output_test.flac; pinned config max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, all toggles True (identical to example.py).
+Action: Wrote scratchpad/run_baseline.py calling upscale(...) with exactly that config; launched via Bash run_in_background:true (background ID biytuv0xn). Deleted any pre-existing output_test.flac first.
+Reasoning: Rules file measures this run at ~20.6 min (LMS filter ~9-10 min/channel), above the 10-min single-Bash-call cap; must be backgrounded. Launched first so steps 1-5 run concurrently.
+Output: Background job started, awaiting completion notification.
+
+### [07:11:40 UTC] Step 1 — read_audio/write_audio on synthesized samples
+Input: pydub Sine(440) mono 1000 ms MP3; stereo Sine(440)/Sine(880) MP3; plus repo input_test.mp3 / input_test.flac for reference properties.
+Action: Ran scratchpad/step1_roundtrip.py exercising read_audio + write_audio (flac and wav) and inspecting via soundfile.info/sf.read/mutagen.FLAC.
+Reasoning: Rules "What to check" step 1 — verify bitrate, sample rate, channels, duration on a synthesized sample.
+Output: read_audio mono: sr=44100, 44100 samples, ndim=1, channels=1, bitrate=63999 bps, duration=1000 ms, peak=31212.0 (raw PCM scale), dominant=440.0 Hz, all finite. read_audio stereo: sr=44100, shape (44100,2), bitrate=127997. write_audio FLAC: sr=44100 preserved, channels=1 preserved, duration=1.000 s (delta 0.000 s), subtype PCM_24, mutagen bitrate 938384 bps / 24 bps-sample. FAILURE: clipped_fraction=0.99993 (mono flac), 0.99997 (stereo flac), 0.99993 (wav) — write_audio does not scale raw-PCM-scale input into [-1,1]. Control with pre-scaled 0.5-peak data: out_peak=0.5, max_abs_err=6.0e-8, clipped=0.0 — so the writer itself is lossless for in-range data. Repo refs: input_test.mp3 sr=44100 ch=2 192000 bps 15.137 s; input_test.flac sr=308700 (=44100x7) ch=2 5293890 bps 15.137 s.
+
+### [07:12:10 UTC] Steps 2-4 — Test coherence review + suite run
+Input: fat_llama/tests/test_feed.py (2 tests); unittest runner.
+Action: Read test_feed.py; ran `python -m unittest fat_llama.tests.test_feed -v` (pytest not installed in .venv).
+Reasoning: Rules "What to check" step 2 — flag tests that assert only existence/non-emptiness rather than audio content; fix incoherent assertions, report deep production bugs.
+Output: test_read_audio PASS — assertions are coherent (sample rate, sample count, ndim/mono shape, channels, duration, bitrate band, non-silence, finiteness, and FFT dominant-peak == 440 Hz). test_write_audio FAIL — clipped_fraction 0.99993 not < 0.05. Assertion judged COHERENT and correct; failure traces to a real defect in write_audio() (fat_llama/audio_fattener/feed.py:66-81), which casts to float64 and hands data to soundfile with PCM_24 subtype without scaling to [-1,1]. Did NOT weaken the assertion; deferring the source fix to generate-code. Also noted: test_feed.py imports new_interpolation_algorithm, patch, MagicMock but never uses them (coverage gap, not incoherence); ResourceWarning for unclosed mp3 handle in create_test_mp3. No test edits made this run.
+
+### [07:34:20 UTC] Step 6 — Pinned baseline upscale COMPLETED
+Input: background job biytuv0xn (launched 07:09:30).
+Action: Waited for the job's own completion notification (no blocking foreground call, no manual sleep/poll loop), per the rules file's "How to run it without being killed".
+Reasoning: Rules pin this config; runtime is dominated by lms_filter's per-sample Python loop, so it cannot be shortened by reducing max_iterations.
+Output: exit code 0, ELAPSED_SECONDS=1415.3 (23.6 min — consistent with the rules file's ~20.6 min measured baseline). Log shows upscale factor 7, stereo detected, IST on both channels, autoscale, normalize, adaptive filter, saved output_test.flac. Produced: 308700 Hz, 2 ch, 4672878 frames, 15.1373 s, PCM_24 FLAC, 13430849 B, mutagen bitrate 7098112 bps.
+
+### [07:36:05 UTC] Step 5+6 — Coherence score computation
+Input: output_test.flac (from step 6) vs input_test.mp3.
+Action: Ran scratchpad/score.py (scipy/numpy only, no librosa) computing clipping fraction, invalid samples, dropout runs, discontinuity percentiles, band-energy fractions, rolloff, noise-floor ratio; then a supplementary output-vs-mp3 STFT correlation + 20 ms RMS envelope correlation.
+Reasoning: Rules Scoring -> Coherence score requires every score to trace to a measured number. Added the output-vs-mp3 comparison because the reference input_test.flac is itself a prior pipeline output and cannot vouch for fidelity to the actual MP3 source.
+Output: duration_delta vs source = +0.00028 s (well within tolerance); sample rate 44100x7 = 308700 as expected; channels preserved 2. clipping_fraction=0.000228; invalid_samples=0; discontinuity p99.9 scale-adjusted ratio=1.481 (max jump 0.0853, no click-level steps); dropout_runs_unmatched=1 spanning 0.000-0.204 s (output peak 8e-05 = -82 dBFS vs mp3 0.00873 = -41 dBFS there) — LMS warm-up, w initialized to zeros. Added detail: NONE in audible band — output rolloff 13415 Hz vs input 13717 Hz (decreased); every shared band above 500 Hz LOST relative energy; 0-500 Hz gained. 2.46% of output energy sits above 22050 Hz. noise_floor_median_ratio_out_over_in=1.433 (+3.1 dB broadband). Structure: corr_out_vs_mp3=1.0000, spec_convergence_vs_mp3=0.9909, envelope_corr=1.0000. SCORE = 6/10.
+
+### [07:37:30 UTC] Step 7 — Spectral deviation score + spectrogram image
+Input: input_test.flac (reference) vs output_test.flac.
+Action: Ran the rules file's fixed algorithm verbatim: soundfile read, mono downmix, float64, no resample needed (both 308700 Hz), trim to min length 4672878, scipy.signal.stft nperseg=2048 noverlap=1024, per-spectrogram max normalization, Frobenius spectral convergence + Pearson correlation, combined*10. Generated the two-panel log-magnitude matplotlib comparison (input_test.mp3 vs output_test.flac, shared -120..0 dB scale) and wrote docs/images/spectrogram_comparison.png (991765 B, overwriting previous).
+Reasoning: Pairing the mp3 against the output shows the upscale's effect better than reference-vs-output, which are near-identical.
+Output: spectral_convergence=0.9861, correlation=0.9999, deviation_score=9.9/10. Spectrogram visually confirms the added-detail finding: the output has NO extension of the ~13.7 kHz MP3 rolloff, but shows three distinct mirrored replica bands centred near 44 kHz, 88 kHz and 132 kHz — zero-order-hold imaging from new_interpolation_algorithm (sample duplication with no anti-imaging lowpass), i.e. aliased copies of the baseband, not reconstructed detail.
+
+### [07:38:10 UTC] Step 8 — Report
+Input: all measurements above.
+Action: Assembled the JSON per the rules file's output contract (tests / scores / spectrogram_image / log).
+Reasoning: Final message must be only that JSON.
+Output: coherence 6/10, spectral_deviation 9.9/10; 8 test entries (5 pass, 3 fail). No source files edited; no test assertions changed (test_write_audio's assertion judged correct as written, failing on a genuine write_audio() defect).
+### [07:38:15 UTC] DONE — Baseline pinned run completed in 1415 s; output is structurally faithful (corr 1.00 vs MP3) but adds no genuine detail (rolloff 13.4 kHz, ultrasonic content is ZOH imaging) with a +3.1 dB noise-floor rise and a 204 ms LMS warm-up dropout; coherence 6/10, spectral deviation 9.9/10; write_audio() clipping defect reported for generate-code.

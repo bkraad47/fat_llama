@@ -28,6 +28,7 @@ fat_llama/
 ├── requirements.txt
 ├── setup.py
 ├── input_test.mp3
+├── input_test.flac
 └── output_test.flac
 ```
 
@@ -280,10 +281,10 @@ Empty — no exports.
 
 ## fat_llama/tests/test_feed.py
 
-`unittest`-based test module for `feed.py`, covering `read_audio` and `write_audio` against a synthesized 440 Hz sine-wave MP3.
+`unittest`-based test module for `feed.py`, covering `read_audio` and `write_audio` against a synthesized 440 Hz sine-wave MP3. Imports `patch`/`MagicMock` from `unittest.mock` and `new_interpolation_algorithm` from `feed.py`, but neither test currently exercises them (unused imports — see Notes).
 
 ### `TestAudioFattener`
-**File:** fat_llama/tests/test_feed.py:9
+**File:** fat_llama/tests/test_feed.py:10
 **Kind:** class
 **Description:** `unittest.TestCase` subclass exercising `read_audio`/`write_audio`. `setUp` generates a 1-second 440 Hz sine wave as `test_input.mp3` via `pydub.generators.Sine`; `tearDown` removes the generated MP3 and any leftover `output_processed.flac`.
 **Usage:**
@@ -292,19 +293,19 @@ python -m pytest fat_llama/tests/test_feed.py -v
 ```
 
 #### `TestAudioFattener.setUp(self) -> None`
-**File:** fat_llama/tests/test_feed.py:11
+**File:** fat_llama/tests/test_feed.py:12
 **Kind:** method
 **Description:** Creates a fresh test MP3 (`test_input.mp3`) before each test via `create_test_mp3`. Inferred from body (no docstring).
 **Returns:** `None`.
 
 #### `TestAudioFattener.tearDown(self) -> None`
-**File:** fat_llama/tests/test_feed.py:16
+**File:** fat_llama/tests/test_feed.py:17
 **Kind:** method
 **Description:** Deletes `test_input.mp3` and `output_processed.flac` if present, after each test. Inferred from body (no docstring).
 **Returns:** `None`.
 
 #### `TestAudioFattener.create_test_mp3(self, filename) -> None`
-**File:** fat_llama/tests/test_feed.py:23
+**File:** fat_llama/tests/test_feed.py:24
 **Kind:** method
 **Description:** Synthesizes a 1-second 440 Hz sine wave with `pydub.generators.Sine` and exports it as an MP3 to `filename`. Inferred from body (no docstring).
 **Parameters:**
@@ -312,20 +313,21 @@ python -m pytest fat_llama/tests/test_feed.py -v
 **Returns:** `None`.
 
 #### `TestAudioFattener.test_read_audio(self) -> None`
-**File:** fat_llama/tests/test_feed.py:28
+**File:** fat_llama/tests/test_feed.py:29
 **Kind:** method
-**Description:** Asserts that `read_audio` on the generated sine-wave MP3 returns a 44100 Hz sample rate, 44100 samples (1 second), and a bitrate of exactly `63999`.
+**Description:** Asserts `read_audio` on the generated sine-wave MP3 returns a 44100 Hz sample rate and 44100 samples (1 second); that a mono source comes back as a flat 1-D array (`audio.channels == 1`, `samples.ndim == 1`) rather than reshaped to `(N, 2)`; that duration is 1000 ms; that the mp3-reported bitrate falls within the encoder's default CBR band (32000–320000, not a single hard-coded value); and that the samples actually carry signal — non-silent, all-finite, and (via windowed FFT) a dominant spectral peak within 5 Hz of 440 Hz.
 **Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
 
 #### `TestAudioFattener.test_write_audio(self) -> None`
-**File:** fat_llama/tests/test_feed.py:34
+**File:** fat_llama/tests/test_feed.py:53
 **Kind:** method
-**Description:** Reads the generated sine-wave MP3, writes it out as FLAC via `write_audio`, and asserts the output file exists on disk (existence-only check — does not verify audio content/properties of the written file).
+**Description:** Reads the generated sine-wave MP3, writes it out as FLAC via `write_audio`, then asserts real coherence of the round-trip: output file exists; `soundfile.info` reports the same sample rate/channel count and a duration matching the ~1 s input within 0.05 s tolerance; the re-read written data is non-silent; and — the substantive check — fewer than 5% of written samples sit at full-scale clipping (`> 0.999`), guarding against `write_audio` handing raw (non-normalized, PCM-scale) samples straight to an integer `soundfile` subtype, which would clamp nearly every sample to full scale. Cleans up `test_output.flac` in a `finally` block.
 **Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
 
 ## Notes
 
 - `factblock_stale` / inconsistencies observed while reviewing (not fixed by this skill — report only):
   - `setup.py`'s `console_scripts` entry point (`example=example:main`) references `example.main`, but `example.py` defines no `main` function — it only has top-level script code. This entry point would fail if invoked as an installed console script.
-  - `setup.py`'s `version` (`1.1.0`) does not match the current git branch name (`1.4.0-beta`) — version bump bookkeeping for this branch has not yet touched `setup.py`.
+  - `setup.py`'s `version` (`1.1.0`) does not match the current git branch name (`v-1.4.0-latest`) — version bump bookkeeping for this branch has not yet touched `setup.py`.
   - `analysis.py` imports `cupy` unconditionally at module load, same as `feed.py` — both modules require a CUDA-capable GPU/environment to import successfully at all, not just to run GPU-specific code paths.
+  - `fat_llama/tests/test_feed.py` imports `patch`, `MagicMock` (from `unittest.mock`) and `new_interpolation_algorithm` (from `feed.py`) but neither test currently uses them — unused imports left over from a prior version of the test module.
