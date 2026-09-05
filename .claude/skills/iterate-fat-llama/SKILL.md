@@ -14,6 +14,8 @@ Also read `README.md` at the repo root in full, right now, before Step 0 — it'
 
 This skill coordinates other skills/subagents — it does not review, test, or fix anything itself. It also touches git branches, tags, and (at the very end, with confirmation) the GitHub remote — read Step 0 and Step 7 carefully.
 
+This skill also runs non-interactively from `.github/workflows/issue-branch-resolve.yml` when `ITERATE_FAT_LLAMA_CI_MODE=1` is set in the environment — see `.claude/skills/rules/iterate-fat-llama.md`'s "CI / GitHub Actions mode" section for the exact behavior differences (Step 0.2 and Step 7 change) before proceeding if that variable is present.
+
 ## Logging
 
 Before Step 0, open this run's log file per `.claude/rules/logging.md` (name: `iterate-fat-llama-<time>-<user>.log`). This is the top-level log for the whole run — append one entry per step, including per-cycle entries for (a)-(e) in the loop below (log each cycle's `score_i` and the dispatch/log-filename of every skill or subagent it calls), the rollback decision in (f) if it happens, and the final PR outcome in Step 7.

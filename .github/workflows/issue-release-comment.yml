@@ -1,0 +1,88 @@
+name: Comment Release on Issue
+
+on:
+  workflow_run:
+    workflows: ["Deploy to PyPI"]
+    types:
+      - completed
+
+permissions:
+  issues: write
+  pull-requests: read
+  contents: read
+
+jobs:
+  comment:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main at the deployed commit
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Find the merged PR and linked issue
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          PR_BODY=$(gh api "repos/${{ github.repository }}/commits/$SHA/pulls" \
+            --jq '.[0].body // empty' 2>/dev/null || true)
+
+          if [ -z "$PR_BODY" ]; then
+            echo "No PR found for commit $SHA — not from the automated flow, skipping."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiE '(closes|fixes|resolves)[[:space:]]+#[0-9]+' \
+            | grep -oE '[0-9]+' | head -n1 || true)
+
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "PR body has no Closes/Fixes/Resolves reference — not from the automated flow, skipping."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Read version and changelog
+        if: steps.find.outputs.found == 'true'
+        id: release
+        run: |
+          VERSION=$(grep -oE "version='[^']+'" setup.py | sed -E "s/version='([^']+)'/\1/")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Extract the top dated entry from CHANGELOG.md (from the first "## [" line
+          # up to, but not including, the next "## [" line).
+          CHANGELOG_ENTRY=$(awk '/^## \[/{n++} n==1' CHANGELOG.md 2>/dev/null || true)
+          if [ -z "$CHANGELOG_ENTRY" ]; then
+            CHANGELOG_ENTRY="(no CHANGELOG.md entry found for this release)"
+          fi
+
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            echo "$CHANGELOG_ENTRY"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment on the issue
+        if: steps.find.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+          CHANGELOG: ${{ steps.release.outputs.changelog }}
+        run: |
+          {
+            echo "A new release addressing this issue has shipped: **v${VERSION}** is now on PyPI."
+            echo ""
+            echo "$CHANGELOG"
+            echo ""
+            echo "---"
+            echo "_Published automatically after this issue's PR was merged to \`main\`._"
+          } > /tmp/release_comment.md
+
+          gh issue comment "${{ steps.find.outputs.issue_number }}" --body-file /tmp/release_comment.md

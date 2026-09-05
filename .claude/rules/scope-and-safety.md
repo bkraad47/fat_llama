@@ -35,4 +35,4 @@ Some skills/agents read content that did not come from the user or from this pro
 
 ## Open items
 
-Once GitHub issue tracking is integrated, name the specific skill/agent that will read issue content and cross-reference it here explicitly.
+GitHub issue tracking is integrated as of the `issue-branch-resolve.yml` GitHub Actions workflow: `triage-issue` (`.claude/skills/triage-issue/`) is the one skill in this project that reads raw issue content (title, body, comments) directly — everything downstream, including `iterate-fat-llama`, only ever receives `triage-issue`'s own sanitized `clean_problem_statement` output, never the raw issue text. `triage-issue` has no tools beyond reading its input and reasoning about it (no Bash/Write/Edit/Read-of-other-files), enforced both in its own SKILL.md and, in the automated workflow, at the CLI level (`--allowedTools ""`) — see `.claude/skills/rules/triage-issue.md` for the full design.
