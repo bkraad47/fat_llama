@@ -6,7 +6,8 @@ import numpy as np
 import soundfile as sf
 
 from fat_llama.audio_fattener.feed import (
-    iterative_soft_thresholding, lms_filter, read_audio, upscale, write_audio
+    iterative_soft_thresholding, lms_filter, new_interpolation_algorithm,
+    read_audio, upscale, write_audio
 )
 
 
@@ -210,6 +211,187 @@ class TestAudioFattener(unittest.TestCase):
             "across max_iter."
         )
 
+    def test_lms_filter_self_referential_call_genuinely_adapts(self):
+        # Regression test for a cycle 3 finding: upscale() always calls
+        # lms_filter(channel, channel) -- signal and desired are the SAME
+        # array. Before this fix, tap 0 of the filter's input vector was
+        # signal[i] itself (the exact sample being predicted), and the
+        # cycle 1 identity initialization (w = [1, 0, ..., 0]) made
+        # y == desired[i] exactly on every iteration: the LMS error term
+        # was identically zero forever, so the weights never moved and the
+        # filtered output was bit-identical to the input -- an expensive
+        # (~18-19 of the pipeline's ~20 minute runtime) no-op, not an
+        # adaptive filter. The fix introduces a decorrelation lag (delay)
+        # between the predictor's taps and the sample being predicted, so
+        # even in the self-referential case there is a real (if small)
+        # estimation problem and the weights must move to reduce it.
+        sr = 44100
+        num_taps = 32
+        t = cp.linspace(0, 0.2, int(sr * 0.2), endpoint=False)
+        signal = (
+            0.5 * cp.sin(2 * cp.pi * 300 * t)
+            + 0.2 * cp.sin(2 * cp.pi * 900 * t)
+        )
+
+        filtered, w_final = lms_filter(
+            signal, signal, mu=0.001, num_taps=num_taps,
+            return_weights=True
+        )
+
+        # The weights must have moved from the identity-pass-through
+        # initialization -- if they haven't, the filter never adapted.
+        w_initial = cp.zeros(num_taps, dtype=cp.float64)
+        w_initial[0] = 1.0
+        self.assertFalse(
+            bool(cp.allclose(w_final, w_initial)),
+            "lms_filter's tap weights are unchanged from their initial "
+            "value after a full run with signal == desired; the adaptive "
+            "filter did not adapt (likely a degenerate zero-error "
+            "self-referential case, i.e. the cycle 3 no-op bug)."
+        )
+
+        # The filtered output must not be a bit-identical copy of the
+        # input -- that was the direct, measurable symptom of the no-op
+        # bug (e was identically zero, so y == desired[i] == signal[i]
+        # exactly every sample).
+        start = num_taps + 1
+        self.assertFalse(
+            bool(cp.allclose(filtered[start:], signal[start:])),
+            "lms_filter's output is bit-identical to its input for the "
+            "signal == desired case; the filter is acting as a pure "
+            "pass-through instead of genuinely adapting."
+        )
+
+        # The fix must not reintroduce the cycle 1 warm-up dropout: the
+        # filtered output must already be tracking the input's magnitude
+        # immediately after warm-up, not ramping up from near-silence.
+        signal_np = cp.asnumpy(signal)
+        filtered_np = cp.asnumpy(filtered)
+        early_filtered = filtered_np[start:start + 50]
+        early_signal = signal_np[start:start + 50]
+        early_filtered_rms = np.sqrt(np.mean(early_filtered ** 2))
+        early_signal_rms = np.sqrt(np.mean(early_signal ** 2))
+        self.assertGreater(
+            early_filtered_rms / early_signal_rms, 0.5,
+            "lms_filter's decorrelation-delay fix reintroduced a warm-up "
+            "dropout: filtered RMS immediately after warm-up "
+            f"({early_filtered_rms:.4f}) is far below the input's own "
+            f"RMS in that window ({early_signal_rms:.4f})."
+        )
+
+    def test_ist_harmonic_amplitude_scales_with_signal_peak(self):
+        # Regression test for a cycle 3 finding: iterative_soft_
+        # thresholding's harmonic injection term used a fixed absolute
+        # total amplitude (0.1, spread across max_iter iterations) instead
+        # of one scaled to the input's own peak amplitude. upscale() never
+        # normalizes before calling this function -- `data` is raw-PCM-
+        # scale (peak ~1e4-3e4 for 16-bit-sourced audio) -- so a fixed
+        # absolute total of 0.1 was an ~1e-5 relative contribution: far too
+        # small to survive the pipeline's later autoscale/normalize steps
+        # (which only apply a global scalar gain and cannot change that
+        # ratio) as measurable added detail. This test isolates the
+        # harmonic term's relative contribution using a threshold small
+        # enough that essentially nothing gets masked in either the time
+        # or frequency domain (so the FFT/IFFT round trip is
+        # near-identity and the harmonic term is the dominant source of
+        # change), and checks that the relative (not absolute) added
+        # contribution is consistent across a large change in the input's
+        # absolute scale.
+        n = 2000
+        t = cp.linspace(0, 1, n, endpoint=False)
+        base_shape = (
+            cp.sin(2 * cp.pi * 300 * t) + 0.3 * cp.sin(2 * cp.pi * 700 * t)
+        )
+        small_scale_signal = base_shape * 1.0
+        large_scale_signal = base_shape * 10000.0
+        negligible_threshold = 1e-9
+        max_iter = 10
+
+        out_small = iterative_soft_thresholding(
+            small_scale_signal.copy(), max_iter, negligible_threshold
+        )
+        out_large = iterative_soft_thresholding(
+            large_scale_signal.copy(), max_iter, negligible_threshold
+        )
+
+        added_small = float(
+            cp.max(cp.abs(out_small - small_scale_signal))
+        )
+        added_large = float(
+            cp.max(cp.abs(out_large - large_scale_signal))
+        )
+        relative_added_small = added_small / float(
+            cp.max(cp.abs(small_scale_signal))
+        )
+        relative_added_large = added_large / float(
+            cp.max(cp.abs(large_scale_signal))
+        )
+
+        self.assertGreater(
+            relative_added_large, relative_added_small * 0.5,
+            "iterative_soft_thresholding's harmonic contribution collapses "
+            "relative to the signal's own peak as absolute scale grows "
+            f"(relative added: {relative_added_small:.3g} at peak=1 vs "
+            f"{relative_added_large:.3g} at peak=10000); the harmonic "
+            "amplitude is likely a fixed absolute constant rather than "
+            "one scaled to the input's own amplitude, making it "
+            "unmeasurable at real (raw PCM-scale) audio amplitudes."
+        )
+
+    def test_new_interpolation_algorithm_is_bandlimited(self):
+        # Regression test for a cycle 3 finding: new_interpolation_
+        # algorithm used zero-order-hold duplication (each sample
+        # repeated upscale_factor times), which injects strong mirrored
+        # spectral images above the original Nyquist frequency (measured,
+        # audio-quality-checker: near 44.1/88.2/132.3 kHz for a 7x
+        # upscale of 44.1 kHz audio) instead of genuine added detail, and
+        # left iterative_soft_thresholding little headroom to add real
+        # content since the ZOH-duplicated shape dominated the waveform.
+        # A bandlimited (FFT zero-padding) interpolation should introduce
+        # no new spectral content above the original Nyquist frequency.
+        sr = 44100
+        n = 4410  # 0.1s of audio
+        t = cp.linspace(0, n / sr, n, endpoint=False)
+        tone = 10000.0 * cp.sin(2 * cp.pi * 300 * t)
+        upscale_factor = 7
+
+        expanded = new_interpolation_algorithm(tone, upscale_factor)
+
+        self.assertEqual(len(expanded), n * upscale_factor)
+        self.assertTrue(
+            bool(cp.all(cp.isfinite(expanded))),
+            "new_interpolation_algorithm produced non-finite output."
+        )
+
+        new_sr = sr * upscale_factor
+        spectrum = cp.abs(cp.fft.rfft(expanded))
+        freqs = cp.fft.rfftfreq(len(expanded), 1.0 / new_sr)
+        original_nyquist = sr / 2.0
+
+        below_nyquist_peak = float(cp.max(spectrum[freqs <= original_nyquist]))
+        above_nyquist_peak = float(cp.max(spectrum[freqs > original_nyquist]))
+
+        # The imaging artifact this replaces would put energy comparable
+        # to the below-Nyquist peak at mirrored image frequencies above
+        # the original Nyquist; a genuinely bandlimited interpolation
+        # should leave that band close to the FFT's own floating-point
+        # noise floor, many orders of magnitude below the real content.
+        self.assertLess(
+            above_nyquist_peak, below_nyquist_peak * 1e-4,
+            "new_interpolation_algorithm introduced significant spectral "
+            f"energy above the original Nyquist frequency (peak "
+            f"{above_nyquist_peak:.3g} vs in-band peak "
+            f"{below_nyquist_peak:.3g}); this looks like zero-order-hold "
+            "imaging rather than bandlimited interpolation."
+        )
+
+        # The interpolated tone must still be recognizable as the same
+        # 300 Hz content, not distorted into something else.
+        dominant_freq = float(
+            freqs[cp.argmax(spectrum[freqs <= original_nyquist])]
+        )
+        self.assertAlmostEqual(dominant_freq, 300.0, delta=5.0)
+
     def test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate(
         self
     ):
@@ -258,6 +440,46 @@ class TestAudioFattener(unittest.TestCase):
                 "Output sample rate does not match the documented "
                 "upscale_factor = round(target_bitrate_kbps * 1000 / "
                 "source bitrate) formula."
+            )
+
+            # The upscaled output must also be coherent *audio*, not just a
+            # file with the right header: without these, the test would pass
+            # on an all-silent or all-NaN output of the correct sample rate.
+            # Duration is preserved by construction (both the sample count
+            # and the sample rate are multiplied by upscale_factor), so the
+            # output must still be ~1 second long.
+            self.assertAlmostEqual(
+                info.duration, 1.0, delta=0.05,
+                msg="Upscaled output duration does not match the 1 s input; "
+                    "upscale() multiplies both sample count and sample rate "
+                    "by upscale_factor, so duration must be preserved."
+            )
+            out_data, _ = sf.read(output_file, always_2d=True)
+            self.assertEqual(out_data.shape[1], 1)
+            self.assertTrue(
+                np.all(np.isfinite(out_data)),
+                "Upscaled output contains NaN/Inf samples."
+            )
+            self.assertGreater(
+                np.sqrt(np.mean(out_data ** 2)), 1e-3,
+                "Upscaled output is (near) silence; the pipeline produced no "
+                "audible signal."
+            )
+            self.assertLess(
+                np.mean(np.abs(out_data) > 0.999), 0.05,
+                "More than 5% of upscaled samples are clipped to full scale."
+            )
+            # The 440 Hz tone of the source must survive the whole pipeline
+            # (interpolation + IST + autoscale + normalize).
+            mono = out_data[:, 0]
+            windowed = (mono - np.mean(mono)) * np.hanning(len(mono))
+            spectrum = np.abs(np.fft.rfft(windowed))
+            out_freqs = np.fft.rfftfreq(len(mono), 1.0 / info.samplerate)
+            self.assertAlmostEqual(
+                out_freqs[np.argmax(spectrum)], 440.0, delta=5.0,
+                msg="Dominant frequency of the upscaled output is not the "
+                    "440 Hz of the source sine wave; the upscale pipeline "
+                    "did not preserve the input's pitch."
             )
 
             real_bitrate_kbps = (

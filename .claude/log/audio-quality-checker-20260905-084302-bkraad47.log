@@ -1,0 +1,54 @@
+# audio-quality-checker run 20260905-084302 (user: bkraad47)
+
+### [08:43:02 UTC] Step 0 — Init
+Input: Task from parent agent: check produced audio output quality + test coherence per .claude/agents/rules/audio-quality.md.
+Action: Read .claude/agents/rules/audio-quality.md, .claude/rules/scope-and-safety.md, fat_llama/audio_fattener/feed.py, fat_llama/tests/test_feed.py, example.py. Created .claude/log/.
+Reasoning: Ground in rules/output contract before touching anything; read feed.py to know pipeline stages before measuring.
+Output: Log opened. venv python at venv/Scripts/python.exe. Repo root has input_test.mp3, input_test.flac, output_test.flac (stale).
+
+### [08:46:10 UTC] Step 6-launch (early) — Baseline upscale dispatched to background
+Input: Fixed baseline config per audio-quality.md step 3 (max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, all toggles True), input_test.mp3 -> output_test.flac.
+Action: Wrote scratchpad/run_baseline.py; deleted stale output_test.flac; launched via Bash run_in_background:true. FIRST attempt used ./venv/Scripts/python.exe -> ModuleNotFoundError: cupy. Probed envs: the project's live interpreter is .venv (dot-venv), not venv; .venv has cupy 14.2.0, numpy 2.4.4, scipy 1.17.1, soundfile 0.13.1, matplotlib 3.10.9, and 1 CUDA device (NVIDIA GeForce RTX 4050 Laptop GPU). Relaunched with .venv python (bg id bx7bbsvyc).
+Reasoning: Launched first so the ~20 min run overlaps steps 1-2; rules forbid running it as a blocking foreground call (10 min tool cap).
+Output: FAILED (venv) then running (.venv). Environment finding: stale `venv/` dir at repo root has no deps installed; `.venv/` is the real env.
+
+### [08:47:30 UTC] Step 1 — read_audio/write_audio on synthesized samples
+Input: pydub Sine generators (mono 440 Hz 1 s; stereo 440/660 Hz 1 s), plus repo input_test.mp3 / input_test.flac for context.
+Action: Ran scratchpad/step1_rw.py: read_audio(mp3) -> write_audio(flac), inspected with soundfile + mutagen.
+Reasoning: Verify bitrate/sample rate/channels/duration behavior of the I/O layer independent of the IST pipeline.
+Output: PASS both. mono: in 44100 Hz/1 ch/1.000 s/64.0 kbps -> out FLAC 44100 Hz/1 ch/1.000 s/PCM_24/459.9 kbps eff., peak 1.0, clipped 4.5e-5, dominant 440.00 Hz, no non-finite. stereo: in 44100 Hz/2 ch/1.000 s/128.0 kbps -> out 44100 Hz/2 ch/1.000 s/PCM_24/925.1 kbps eff., clipped 1.1e-5, dominant 440.00 Hz. Sample rate, channel count and duration all preserved exactly. Repo refs: input_test.mp3 = 44100 Hz/2 ch/15.137 s/192.0 kbps; input_test.flac = 308700 Hz (= 44100 x 7)/2 ch/15.137 s/5293.9 kbps (consistent with upscale_factor = round(1400000/192000) = 7).
+
+### [08:49:00 UTC] Steps 2-4 — Test coherence review + suite run
+Input: fat_llama/tests/test_feed.py (5 tests).
+Action: Reviewed all 5 for meaningful audio-content assertions. Found 4 already coherent (test_read_audio, test_write_audio, test_lms_filter_no_extended_warmup_dropout, test_ist_harmonic_injection_bounded_across_iterations). Found one gap: test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate exercised the FULL upscale() pipeline but only asserted on samplerate + file size/bitrate -- it would have passed on an all-silent or all-NaN output. Strengthened its assertions in place (duration ~1 s, channel count, all-finite, RMS > 1e-3 non-silence, clipped fraction < 5%, dominant frequency still 440 Hz). No production code touched. Ran the suite with `.venv python -m unittest fat_llama.tests.test_feed -v` (pytest not installed in .venv).
+Reasoning: Per fixing philosophy, assertion-level fixes are in scope; the only whole-pipeline test asserting nothing about audio content is exactly the "file exists / right header" incoherence the rules call out.
+Output: Ran 5 tests -- OK (all pass, 16.5 s), including the newly strengthened assertions.
+
+### [09:12:40 UTC] Step 6 — Baseline upscale completed (background bg id bx7bbsvyc)
+Input: input_test.mp3 (44100 Hz, 2 ch, 15.137 s, 192 kbps), fixed baseline config (unchanged).
+Action: Waited for the background command's own completion notification (did not shorten max_iterations, did not run in foreground). Two non-blocking wait cycles while the LMS filter stage ran.
+Reasoning: Rules pin the config and forbid foreground execution (10 min tool cap vs ~20 min run).
+Output: exit code 0, elapsed_seconds=1252.7 (~20.9 min). Log line sequence: upscale factor 7, stereo, 2x (interpolate + IST), autoscale, normalize, adaptive filter, saved. output_test.flac = 308700 Hz / 2 ch / 15.1373 s / PCM_24 / 13,872,022 bytes / 7331.3 kbps effective.
+
+### [09:14:20 UTC] Step 5+6 — Spectral analysis and coherence score
+Input: input_test.mp3 vs output_test.flac.
+Action: Ran scratchpad/analyze.py plus two supplementary probes (percentile noise floor, ultrasonic band profile at nperseg=8192).
+Reasoning: Each coherence-table criterion needs a specific measured number per the Scoring section.
+Output:
+  - Invalid samples: 0 non-finite. PASS
+  - Clipping: 0.0169% of output samples > 0.999 (input 0.00015%). PASS (negligible)
+  - Dropouts: 0 runs of |x| < 1e-4 longer than 50 ms in output (and 0 in input) -> 0 unmatched dropouts. PASS (the old ~200 ms LMS warm-up dropout is gone)
+  - Discontinuities: |diff| p99.9 out 0.0582 vs in 0.0973; max |diff| out 0.2522 vs in 0.2325. Slope-per-second ratio 4.18x, below the 7x a pure zero-order hold implies. PASS, no click/pop signature
+  - Spectral structure: in-band (<22.05 kHz) mp3-vs-output correlation 1.0000, convergence 0.9933. PASS
+  - Noise floor (100 Hz-16 kHz, unit-RMS normalized): p50 rise +2.61 dB, p10 rise +4.25 dB. FAIL (down from the +6.12 dB recorded before the IST harmonic fix, but still a broadband in-band rise)
+  - Band energy deltas: 0-1 kHz +1.44, 1-4 k +0.21, 4-8 k -0.20, 8-12 k -0.88, 12-16 k -1.09, 16-18 k -2.22, 18-20 k -2.47 dB -- progressive treble droop matching the 7x zero-order-hold sinc envelope (~-3.2 dB predicted at 20 kHz)
+  - Added detail: +98.7 dB in 22.05-40 kHz, but the ultrasonic profile relative to the 0-1 kHz band peaks at 40-50 kHz (-39.8), 80-90 kHz (-44.2), 130-140 kHz (-46.3) with nulls at 60-70 kHz (-64.7) and 150-160 kHz (-74.9) -- a ~44.1 kHz-periodic mirror-image pattern, i.e. zero-order-hold imaging replicas, NOT genuine harmonic extension. Total energy above 22.05 kHz = 0.0336% of output energy.
+  COHERENCE SCORE: 6/10 (clean on clipping/dropouts/invalid/discontinuities and perfect in-band correlation, but a moderate broadband in-band noise-floor rise and no genuine added detail).
+
+### [09:16:10 UTC] Step 7 — Spectral deviation score + spectrogram image
+Input: input_test.flac (reference, 308700 Hz) vs output_test.flac.
+Action: Ran the rules' fixed algorithm (mono downmix, no resample needed -- both 308700 Hz, trim to 4,672,878 samples, scipy.signal.stft nperseg=2048 noverlap=1024, per-spectrogram max normalization). Also hashed and diffed both files to sanity-check the near-perfect result. Rendered the two-panel matplotlib comparison and saved it.
+Reasoning: A convergence of ~1.0 is suspicious enough to verify rather than report at face value.
+Output: spectral_convergence = 0.999994, correlation = 1.000000, combined = 0.999997, DEVIATION SCORE = 10.0. Verification: max abs sample difference between input_test.flac and output_test.flac is 2.15e-06 (about 18 LSBs at 24-bit) -- the committed reference IS a prior run of this same baseline, so the 10.0 measures run-to-run reproducibility, not fidelity to independent ground truth. Flagged in the report. Image written to docs/images/spectrogram_comparison.png (visually confirms three mirror-image replicas at ~44/88/132 kHz and a faithful 0-22 kHz baseband).
+
+### [09:17:00 UTC] DONE — Coherence 6/10, spectral deviation 10.0/10; all 5 tests pass after strengthening one incoherent whole-pipeline test; open issues reported: broadband in-band noise-floor rise (+2.61/+4.25 dB), zero-order-hold imaging + treble droop from new_interpolation_algorithm, and a reference file that is itself a prior pipeline output.

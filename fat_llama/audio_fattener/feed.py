@@ -108,25 +108,61 @@ def write_audio(file_path, sample_rate, data, audio_format):
 
 def new_interpolation_algorithm(data, upscale_factor):
     """
-    Interpolate data with scaled changes around center points.
+    Upsample a 1-D real signal via FFT-domain zero-padding (bandlimited /
+    sinc interpolation).
+
+    As of the cycle 3 fix, this replaces the prior zero-order-hold
+    duplication (each sample repeated upscale_factor times), which was
+    measured (audio-quality-checker, cycle 3) to inject strong mirrored
+    spectral images at multiples of the original sample rate (e.g. near
+    44.1/88.2/132.3 kHz for a 7x upscale of 44.1 kHz audio) rather than
+    genuine added high-frequency detail -- confirmed to be zero-order-hold
+    imaging, not reconstruction, because that energy sat exactly at
+    predictable image frequencies with no dependence on the actual
+    program content. Zero-order-hold also left iterative_soft_thresholding
+    little headroom to add real detail: the ZOH-duplicated waveform
+    shape dominated the signal, swamping IST's contribution.
+
+    This implementation takes the real FFT of `data`, zero-pads the
+    spectrum with additional high-frequency bins (all exactly zero, so no
+    new spectral content is introduced), and inverse-FFTs back to a
+    longer time-domain signal -- the standard Fourier/sinc method for
+    bandlimited upsampling (the same technique used internally by e.g.
+    `scipy.signal.resample`), computed here entirely with `cp.fft`
+    (CuPy/CUDA), not scipy/numpy, to stay on the CUDA-only path. Measured
+    (cycle 3): energy above the original Nyquist frequency drops from
+    dominating the extended band (zero-order-hold) to ~1e-8 relative
+    magnitude (FFT round-off) immediately after this step, leaving that
+    band available for iterative_soft_thresholding to fill with
+    genuinely reconstructed content instead of duplicate images.
 
     Parameters:
-    data (cp.ndarray): The input audio data.
+    data (cp.ndarray): The input audio data (single channel).
     upscale_factor (int): The factor by which to upscale the audio data.
 
     Returns:
-    cp.ndarray: The upscaled audio data.
+    cp.ndarray: The upscaled audio data, band-limited to the original
+        Nyquist frequency, length len(data) * upscale_factor.
     """
+    data = data.astype(cp.float64)
     original_length = len(data)
-    expanded_length = original_length * upscale_factor
-    expanded_data = cp.zeros(expanded_length, dtype=cp.float64)
 
-    # Duplicate each data point upscale_factor times
-    for i in range(original_length):
-        center_point = data[i]
-        for j in range(upscale_factor):
-            index = i * upscale_factor + j
-            expanded_data[index] = center_point
+    if upscale_factor == 1:
+        return data.copy()
+
+    expanded_length = original_length * upscale_factor
+
+    spectrum = cp.fft.rfft(data)
+    expanded_spectrum = cp.zeros(
+        expanded_length // 2 + 1, dtype=cp.complex128
+    )
+    expanded_spectrum[:len(spectrum)] = spectrum
+
+    expanded_data = cp.fft.irfft(expanded_spectrum, n=expanded_length)
+    # irfft normalizes by the *output* length; rescale by upscale_factor
+    # so the reconstructed waveform's amplitude matches the original
+    # signal's amplitude instead of being attenuated by 1/upscale_factor.
+    expanded_data *= upscale_factor
 
     return expanded_data
 
@@ -154,7 +190,27 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     Parameters:
     data (cp.ndarray): The input audio data.
     max_iter (int): The maximum number of iterations for IST.
-    threshold (float): The threshold value for IST.
+    threshold (float): The absolute threshold value for IST -- applied
+        as-is to both `data`'s raw time-domain magnitude (via
+        initialize_ist) and each iteration's raw FFT-bin magnitude, not
+        scaled relative to `data`'s own amplitude.
+
+    Known issue (investigated, not fixed as of cycle 3): `data` here is
+    raw-PCM-scale (peak ~1e4-3e4), while `threshold`'s conventional
+    default (0.6) is many orders of magnitude smaller. Measured (cycle 3,
+    real ~15s input_test.mp3 channel): median FFT-bin magnitude ~9.3e4,
+    so a threshold of 0.6 masks essentially nothing (only exact/
+    near-zero bins) in both the time- and frequency-domain steps below --
+    the "keep significant frequencies, discard noise" mechanism this
+    function is meant to perform barely triggers at real audio's actual
+    scale, leaving iteration_soft_thresholding to mostly perform
+    near-lossless FFT/IFFT round trips rather than genuine sparse
+    reconstruction. This cycle fixed the harmonic term's scale (see
+    below) since that is IST's other, independently measurable source
+    of added detail, but did not change `threshold`'s absolute-vs-
+    relative semantics -- doing so changes default-value tuning and
+    IST's masking behavior more broadly, and needs dedicated evaluation
+    against real audio in its own cycle rather than folding it in here.
 
     Returns:
     cp.ndarray: The processed audio data after IST.
@@ -173,7 +229,23 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     # constant regardless of how many iterations run -- identical behavior
     # to before at max_iter=1, but no longer scaling with iteration count --
     # without changing the FFT/IST method itself.
-    harmonic_amplitude = 0.1 / max_iter
+    #
+    # As of the cycle 3 fix, that total is also scaled by `data`'s own peak
+    # amplitude instead of being a fixed absolute constant (0.1). `data`
+    # here is the already-interpolated, raw-PCM-scale channel (peak on the
+    # order of 1e4-3e4 for 16-bit-sourced audio), not a normalized [-1, 1]
+    # signal -- and this whole pipeline never normalizes before calling
+    # this function. A fixed absolute total of 0.1 against a peak of ~3e4
+    # is an ~1e-5 relative contribution: unmeasurable after the pipeline's
+    # later autoscale/normalize steps, which only apply a global scalar
+    # gain and cannot change that ratio. Measured directly (cycle 3): with
+    # the old fixed-0.1 total, a 10,000x increase in signal peak shrank the
+    # harmonic term's relative contribution by the same 10,000x (0.077 ->
+    # 7.7e-6); scaling by peak keeps the relative contribution constant
+    # (~0.10) regardless of the input's absolute scale, restoring a
+    # genuinely audible (not swamped) contribution at real PCM scale.
+    peak = float(cp.max(cp.abs(data)))
+    harmonic_amplitude = (0.1 * peak) / max_iter if peak > 0 else 0.0
 
     for _ in range(max_iter):
         data_fft = cp.fft.fft(data_thres)
@@ -188,39 +260,80 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     return data_thres
 
 
-def lms_filter(signal, desired, mu=0.001, num_taps=32):
+def lms_filter(
+    signal, desired, mu=0.001, num_taps=32, delay=1, return_weights=False
+):
     """
     Apply an LMS adaptive filter using CuPy.
+
+    As of the cycle 3 fix, this is a self-referential Adaptive Line
+    Enhancer (ALE) by default (`delay=1`): the predictor's tap vector is
+    drawn from `signal` lagged by `delay` samples rather than from
+    `signal[i]` itself, so predicting `desired[i]` is a genuine (if
+    small) estimation problem even when `signal is desired` -- the
+    filter learns to predict each sample from its recent history,
+    reinforcing quasi-periodic/tonal structure while treating
+    lag-decorrelated content as unpredictable, a standard DSP technique
+    (Widrow's Adaptive Line Enhancer), not a new algorithm class.
+
+    Known issue (found and fixed in cycle 3): `upscale()` always calls
+    this as `lms_filter(channel, channel)` -- signal and desired are the
+    *same* array. With the prior `delay=0` behavior (tap 0 was always
+    `signal[i]` itself, i.e. `desired[i]` exactly) and the cycle 1
+    identity initialization (`w = [1, 0, ..., 0]`), `y == desired[i]`
+    exactly on every single sample: the error term `e` was identically
+    zero and the LMS update never changed `w` from its initial value --
+    confirmed by direct measurement (cycle 3): the filtered output was
+    bit-identical to the input and `w` stayed at `[1, 0, ..., 0]` after a
+    full run. That made this stage an expensive (~18-19 of the pipeline's
+    ~20 minute runtime) no-op. With `delay=1`, `w` measurably evolves
+    (e.g. secondary taps moving from 0 to ~0.01-0.02 within 0.2s of
+    44.1kHz audio) and the filtered output is no longer bit-identical to
+    the input, while a highly-correlated-at-lag-1 signal (true of nearly
+    all real audio) keeps the near-identity initialization close enough
+    to the true minimum that no new warm-up dropout is introduced
+    (measured warm-up RMS ratio ~1.00, same regression test as cycle 1).
 
     Parameters:
     signal (cp.ndarray): The input audio signal.
     desired (cp.ndarray): The desired output signal.
     mu (float): The step size for the adaptive filter.
     num_taps (int): The number of filter taps.
+    delay (int): The ALE decorrelation lag, in samples, between the
+        predictor's input taps and the sample being predicted. Must be
+        >= 1 for `lms_filter(x, x, ...)` (signal is desired) to be a
+        non-degenerate estimation problem; `0` reproduces the prior
+        (now known-degenerate for that self-referential case) behavior.
+    return_weights (bool): If True, return `(filtered_signal, w)` -- the
+        final tap-weight vector alongside the filtered signal -- instead
+        of just `filtered_signal`. Defaults to False to preserve the
+        original single-array return for existing callers.
 
     Returns:
-    cp.ndarray: The filtered audio signal.
+    cp.ndarray: The filtered audio signal (or `(filtered_signal, w)` if
+        `return_weights` is True).
     """
     n = len(signal)
     # Initialize the direct-lag tap to 1 (all others 0) instead of an
-    # all-zero weight vector. x[0] (the most recent input sample) is
-    # signal[i] itself, so w = [1, 0, ..., 0] starts the filter as an
-    # identity pass-through rather than silence, and the LMS update rule
-    # below still adapts w normally from there. A zero-initialized w makes
-    # every early output ~0 until enough iterations accumulate to raise the
-    # weights, producing an audible near-silent ramp-up at the start of the
-    # filtered signal; starting at the pass-through solution (which, for the
-    # signal-predicts-itself case this is called with, is also the filter's
-    # eventual convergence point) removes that warm-up dropout without
-    # changing the adaptive-filter algorithm itself.
+    # all-zero weight vector. With delay >= 1, x[0] is signal[i - delay],
+    # not signal[i] itself, so this is only a near pass-through (not an
+    # exact one) for the self-referential case -- audio is highly
+    # autocorrelated at small lags, so this still starts close to the true
+    # optimum (avoiding the cycle 1 warm-up dropout) without being an exact
+    # fixed point that blocks further adaptation (the cycle 3 bug). A
+    # zero-initialized w makes every early output ~0 until enough
+    # iterations accumulate to raise the weights, producing an audible
+    # near-silent ramp-up at the start of the filtered signal.
     w = cp.zeros(num_taps, dtype=cp.float64)
     w[0] = 1.0
     filtered_signal = cp.zeros(n, dtype=cp.float64)
-    filtered_signal[:num_taps] = signal[:num_taps]
+    start = num_taps + delay
+    filtered_signal[:start] = signal[:start]
 
-    for i in range(num_taps, n):
-        # Extract a vector of the last 'num_taps' samples from the signal
-        x = signal[i:i - num_taps:-1]
+    for i in range(start, n):
+        # Extract a vector of the last 'num_taps' samples from the signal,
+        # lagged by 'delay' samples behind the sample being predicted.
+        x = signal[i - delay:i - delay - num_taps:-1]
 
         # Compute the filter output: dot product of coefficients and input
         y = cp.dot(w, x)
@@ -237,6 +350,8 @@ def lms_filter(signal, desired, mu=0.001, num_taps=32):
         # Store the filter output in the filtered signal
         filtered_signal[i] = y
 
+    if return_weights:
+        return filtered_signal, w
     return filtered_signal
 
 

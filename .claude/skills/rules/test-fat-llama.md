@@ -13,10 +13,15 @@ Per `.claude/rules/scope-and-safety.md`: this skill writes exactly one file itse
   "tests": [ /* entries from code-tester-reviewer */ ],
   "quality": [ /* entries from audio-quality-checker */ ],
   "scores": { /* the "scores" object verbatim from audio-quality-checker's report */ },
+  "upscale_params_used": { /* verbatim from audio-quality-checker's report, if present */ },
   "spectrogram_image": "docs/images/spectrogram_comparison.png",
   "logs": [ "<code-tester-reviewer log path>", "<audio-quality-checker log path>", "<this coordinator's own log path>" ]
 }
 ```
+
+## Optional input: proposed upscale parameters
+
+A caller (typically `iterate-fat-llama`, per its "Proposed upscale parameters carry-forward" rule) may pass this skill a `proposed_upscale_params` object — an `upscale()` kwargs set `generate-code` proposed in a prior cycle. When present, relay it verbatim into the `audio-quality-checker` dispatch's prompt in Step 2, so its coherence-score run uses that config instead of its fixed reference baseline (per `.claude/agents/rules/audio-quality.md`). When absent, dispatch `audio-quality-checker` with no parameter override — it uses its baseline by default. Either way, include whatever `upscale_params_used` it reports back in the merged JSON above so the caller/log can see which config actually ran.
 
 ## README update contract
 

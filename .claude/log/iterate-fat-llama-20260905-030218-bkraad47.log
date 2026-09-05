@@ -62,4 +62,37 @@ Output: score_2 = 0.714 != 1.0 — not satisfactory, proceeding to fix. Note: te
 ### [08:40:00 UTC] Cycle 2, step (d) — Fix
 Input: Cycle 2's audio_quality failures (4) and quality findings summary, DIRECTIVES, mission context, plus cycle 1's prior decision on the interpolation-imaging issue for continuity.
 Action: Dispatched generate-code with priority order (1. bitrate-validation logic vs. test premise, 2. IST noise-floor rise, 3. interpolation imaging [only if narrower fix found], 4. reference-file independence [confirm out of scope, don't attempt], 5. PEP8/style cleanup).
+Output: Awaiting generate-code's completion (see next entry).
+
+### [08:45:00 UTC] Cycle 2, step (d) — Fix result
+Input: generate-code completion (log .claude/log/generate-code-20260905-083154-bkraad47.log).
+Output: outcome=confirmed. Fixed IST's unbounded noise-floor rise (harmonic term now scaled 1/max_iter). Clarified target_bitrate_kbps docstring rather than changing behavior — determined the failing test's premise (that the parameter promises the real output bitrate) was an undocumented assumption, not a computation bug. PEP8/style + resource-leak cleanup in test_feed.py. 2 new regression tests added, full suite 5/5 pass. Deliberately not fixed (as instructed): interpolation imaging (no narrower fix found than cycle 1's declined full replacement), reference-file independence (confirmed structurally out of scope — repo-root asset outside fat_llama/**), setup.py packaging bug (still out of scope).
+
+### [08:45:00 UTC] Cycle 2, step (e) — Checkpoint
+Action: git add -A && git commit -> c112c68 "iterate-fat-llama: cycle 2 fix". Tagged iterate-fat-llama/20260905-030218/iter-2.
+Output: C_2 = commit c112c68.
+
+Running score table so far: (1, 0.667), (2, 0.714).
+
+### [09:26:04 UTC] Resume — /iterate-fat-llama re-invoked with new DIRECTIVES
+Input: User re-invoked /iterate-fat-llama with ARGUMENTS "Update audio to have better quality" (differs from the prior "fix failing code tests"). Between the pause and this invocation, the user directed several methodology fixes to audio-quality.md (coherence graded against input_test.flac instead of input_test.mp3; shared spectrogram zoom level), scientific-coding.md (Priorities: coherence/spectral accuracy first, algorithm changes explicitly permitted; proposed_upscale_params mechanism), and the iterate-fat-llama/test-fat-llama rules (satisfactory-results early-stop condition; proposed-params carry-forward).
+Action: Asked user via AskUserQuestion how this invocation relates to the paused run. User chose: continue the same branch (iterate-fat-llama/20260905-030218), update DIRECTIVES to the new text for all remaining cycles, and re-run cycle 3's test step fresh rather than reusing the stale pre-methodology-fix data (old test-fat-llama-20260905-084241 / audio-quality-checker-20260905-084302 results, which graded coherence against input_test.mp3 and had no shared spectrogram zoom).
+DIRECTIVES is now "Update audio to have better quality" (supersedes "fix failing code tests" for cycle 3 onward).
+Reasoning: Preserves the legitimate cycle 1-2 fixes (clipping, LMS warmup, IST noise-floor bound) already committed and confirmed by passing tests, rather than rediscovering them from a fresh v-1.4.0-latest branch; re-testing cycle 3 avoids grading against a since-corrected methodology.
+Output: Working tree currently holds C_2 (commit c112c68) plus uncommitted rule-file updates and a legitimate test-assertion strengthening from the stale cycle 3 audio-quality-checker run (kept — it's independent of the mp3-vs-flac methodology question). Proceeding to re-run cycle 3 step (a).
+
+### [09:47:00 UTC] Cycle 3 (resumed), step (a) — Review current state
+Action: review-current-state run (log .claude/log/review-current-state-20260905-092620-bkraad47.log) — only test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate's factblock needed updating.
+
+### [09:47:00 UTC] Cycle 3 (resumed), step (b) — Test
+Action: test-fat-llama run (log .claude/log/test-fat-llama-20260905-092640-bkraad47.log). Result: 18 tests (5 code all pass; 13 audio_quality: 7 pass/6 fail). coherence=8/10, spectral_deviation=10.0/10 (degenerate, self-referential reference).
+IMPORTANT: the corrected mp3-to-flac methodology surfaced that lms_filter's cycle-1 warm-up fix (w[0]=1.0) made it an exact identity pass-through (never adapts, e always 0) — consuming ~19 of ~20 minutes of runtime for zero effect — and that the whole pipeline changes the waveform by <2.1e-06 versus a naive zero-order-hold repeat (no real detail added anywhere). Also confirmed again: input_test.flac is not an independent reference (same zero-order-hold artifact as the mp3). New minor finding: no test coverage for the stereo path.
+score_3 = 7/13 = 0.538.
+
+### [09:47:00 UTC] Cycle 3 (resumed), step (c) — Early stop check
+Output: score_3 = 0.538 != 1.0. Satisfactory-results condition also not met (coherence 8 is not > 8.5). Proceeding to fix — this is now the central target given DIRECTIVES "Update audio to have better quality" and the new coherence/spectral-accuracy-first priority.
+
+### [09:52:00 UTC] Cycle 3 (resumed), step (d) — Fix
+Input: The lms_filter-is-a-noop finding, the no-measurable-added-detail finding, new DIRECTIVES, and the new Priorities section in scientific-coding.md (algorithm-level changes explicitly authorized this cycle).
+Action: Dispatched generate-code with full technical detail on both findings, explicit permission to revisit the interpolation algorithm if warranted, and secondary findings (stereo test coverage) noted as lower priority. Told it this is likely the most consequential cycle so far and to take the space needed.
 Output: Awaiting generate-code's completion.

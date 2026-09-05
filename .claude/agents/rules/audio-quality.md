@@ -19,6 +19,10 @@ Your final message must be *only* this JSON — no prose before or after it:
     "coherence": { "value": 8, "scale": "0-10", "rationale": "no clipping/dropouts/NaNs; high-frequency energy increased over input without added broadband noise" },
     "spectral_deviation": { "value": 7.4, "scale": "0-10", "method": "spectral convergence + correlation on STFT magnitudes (see Scoring below)", "rationale": "convergence=0.81, correlation=0.67 against input_test.flac" }
   },
+  "upscale_params_used": {
+    "source": "baseline | proposed",
+    "params": { "max_iterations": 300, "threshold_value": 0.6, "target_bitrate_kbps": 1400, "toggle_normalize": true, "toggle_autoscale": true, "toggle_adaptive_filter": true }
+  },
   "spectrogram_image": "docs/images/spectrogram_comparison.png",
   "log": ".claude/log/audio-quality-checker-20260905-141500-bkraad47.log"
 }
@@ -29,6 +33,7 @@ Your final message must be *only* this JSON — no prose before or after it:
 - `status` is `"pass"` or `"fail"`.
 - `failure_reason` is `null` when `status` is `"pass"`; otherwise a short, specific description (e.g. "bitrate out of range", "output shorter than input", "test only checks file existence, not audio content").
 - `scores.coherence` / `scores.spectral_deviation`: always present, computed per the **Scoring** section below. `value` is `0` (worst) to `10` (best) — round to one decimal place. `rationale` is one sentence citing the specific metric(s) that drove the score.
+- `upscale_params_used`: always present — `source` is `"baseline"` when you ran the fixed reference config (see "What to check" step 3), or `"proposed"` when your prompt supplied a `generate-code`-proposed parameter set instead; `params` is the exact `upscale()` kwargs actually used this run. This is how the coordinator and a human reading the log can tell which config produced these scores.
 - `spectrogram_image`: repo-relative path to the comparison image you generated this run (always the same path — it's overwritten each run, not versioned).
 - `log`: the path to this run's log file, per `.claude/rules/logging.md`.
 
@@ -39,26 +44,34 @@ Your final message must be *only* this JSON — no prose before or after it:
    - sample rate / channel count preserved or upsampled as intended
    - duration matches the input (within a small tolerance)
 2. **Test coherence** — review [test_feed.py](../../../fat_llama/tests/test_feed.py) and flag any test that doesn't meaningfully assert on audio content (e.g. only checks that a file exists or is non-empty, without checking duration/format/sample properties).
-3. **Coherence score** — run the actual example pipeline and score the result per **Scoring → Coherence score** below, using exactly this fixed baseline config (the same call `example.py` makes at the repo root) — never a higher `max_iterations` or any other exploratory variation:
+3. **Coherence score** — run the actual example pipeline and score the result per **Scoring → Coherence score** below, using exactly one of these two configs — **never both, and never anything you invent yourself**:
 
-   ```python
-   upscale(
-       input_file_path='input_test.mp3',
-       output_file_path='output_test.flac',
-       source_format='mp3',
-       target_format='flac',
-       max_iterations=300,
-       threshold_value=0.6,
-       target_bitrate_kbps=1400,
-       toggle_normalize=True,
-       toggle_autoscale=True,
-       toggle_adaptive_filter=True
-   )
-   ```
+   - **No proposed params in your prompt (the common case, and always true on a target's first assessment):** use this fixed reference/baseline config (the same call `example.py` makes at the repo root):
 
-   **Why this is pinned:** IST's harmonic-reconstruction term (`iterative_soft_thresholding` in `feed.py`) adds a small sinusoid every iteration without bound, so it does not monotonically improve with more iterations — past a certain point, more iterations makes output *worse*, not better. Do not vary `max_iterations` (or any other parameter) searching for a "best" score, and do not increase it if a run seems to be taking a long time — the qualitative assessment is only meaningful when every run uses this identical, comparable baseline. If a run is slow, that is expected — let it finish rather than reducing iterations to speed it up.
+     ```python
+     upscale(
+         input_file_path='input_test.mp3',
+         output_file_path='output_test.flac',
+         source_format='mp3',
+         target_format='flac',
+         max_iterations=300,
+         threshold_value=0.6,
+         target_bitrate_kbps=1400,
+         toggle_normalize=True,
+         toggle_autoscale=True,
+         toggle_adaptive_filter=True
+     )
+     ```
+
+   - **Your prompt explicitly supplies a `generate-code`-proposed parameter set** (the coordinator relays this after a `generate-code` cycle whose `changes`/`notes` proposed different `upscale()` kwargs as part of its fix): use exactly those proposed values instead of the baseline above. Still one `upscale()` call — don't blend, average, or otherwise combine the two configs.
+
+   Record which one you used in `upscale_params_used` (output contract above). **You get exactly one pipeline run per your own turn/invocation** — never run `upscale()` more than once (baseline vs. proposed, or several proposed variants) inside a single dispatch to search for a better score yourself; that comparison is `generate-code`'s and the coordinator's job across cycles, not something you do internally.
+
+   **Why the baseline (when used) is pinned:** IST's harmonic-reconstruction term (`iterative_soft_thresholding` in `feed.py`) adds a small sinusoid every iteration without bound, so it does not monotonically improve with more iterations — past a certain point, more iterations makes output *worse*, not better. When running the baseline config, do not vary `max_iterations` (or any other parameter) searching for a "best" score yourself, and do not increase it if a run seems to be taking a long time — the qualitative assessment is only meaningful when baseline runs are identical/comparable to each other. If a run is slow, that is expected — let it finish rather than reducing iterations to speed it up.
 
    **How to run it without being killed:** this baseline run takes roughly 20 minutes end to end on the reference GPU — measured breakdown: `read_audio` ~0s, interpolation+IST (both channels, 300 iterations) ~105s, normalize ~0s, LMS adaptive filter alone ~9-10 minutes *per channel* (~18-19 min for both) — because `lms_filter` in `feed.py` is a plain per-sample Python loop, not a vectorized op. That means IST/`max_iterations` is *not* the lever for runtime (it's only ~1.75 min of the total); do not shorten it to fit a time budget. Instead, never run this call as a single blocking foreground command — a single Bash tool call (including one that blocks via a manual `sleep`/poll loop) is capped at 10 minutes and will be killed before a ~20 minute run finishes. Launch it as a background command (`run_in_background: true` on the Bash tool, writing to a script that itself calls `upscale(...)` and then something detectable like printing `DONE` at the end) and wait for its own completion notification rather than polling in a blocking loop.
+
+   The pipeline call itself still upscales `input_test.mp3` (that's the MP3→FLAC path this project builds and tests against) — but the **reference signal for every coherence check below is `input_test.flac`, not `input_test.mp3`**. Compare `output_test.flac` against `input_test.flac` throughout the Coherence score checks (dropout correspondence, discontinuity baseline, added-detail bands), the same reference file the Spectral deviation score already uses.
 4. **Spectral deviation score** — compare the repo-root reference `input_test.flac` against the `output_test.flac` produced in step 3, and generate the comparison image, per **Scoring → Spectral deviation score** below.
 
 ## Acceptable ranges
@@ -71,13 +84,13 @@ Both scores are computed from measured signal properties, not listened to — yo
 
 ### Coherence score (0-10)
 
-Runs against the `output_test.flac` produced from `input_test.mp3` per "What to check" step 3. Compute these signal checks first:
+Runs against the `output_test.flac` produced from `input_test.mp3` per "What to check" step 3, graded against the **`input_test.flac` reference** (not `input_test.mp3` — see step 3's note). Resample/align the two the same way the Spectral deviation algorithm does (§below: `resample_poly` to a common rate, trim to `min` length) before computing these checks:
 
 - **Clipping fraction**: proportion of samples with `abs(sample) > 0.999` after normalizing to [-1, 1].
-- **Dropouts**: any contiguous run of near-zero samples (`abs(sample) < 1e-4`) longer than 50ms that has no corresponding silence in the input at the same position.
+- **Dropouts**: any contiguous run of near-zero samples (`abs(sample) < 1e-4`) longer than 50ms that has no corresponding silence in `input_test.flac` at the same position.
 - **Invalid samples**: any `NaN`/`Inf` in the output.
-- **Discontinuities**: sample-to-sample jumps (`abs(diff)`) whose 99.9th percentile is far above the input's — a proxy for audible clicks/pops introduced by processing.
-- **Added detail**: compare input vs output magnitude spectra (STFT, see below) in the frequency bands the input has little/no energy in — a genuine upscale should raise energy there; a broadband noise-floor rise everywhere (not just missing bands) is degradation, not detail.
+- **Discontinuities**: sample-to-sample jumps (`abs(diff)`) whose 99.9th percentile is far above `input_test.flac`'s — a proxy for audible clicks/pops introduced by processing.
+- **Added detail**: compare `input_test.flac` vs output magnitude spectra (STFT, see below) in the frequency bands the reference has little/no energy in — a genuine upscale should raise energy there; a broadband noise-floor rise everywhere (not just missing bands) is degradation, not detail.
 
 Map to a score:
 
@@ -109,7 +122,7 @@ Report both `spectral_convergence` and `correlation` in the `rationale` (see out
 
 ### Spectrogram comparison image
 
-Using the same `S_ref`/input-mp3 and `S_out` data from above (or the `S_out` from step 3's `output_test.flac` run — use whichever pairing best shows the upscale's effect: `input_test.mp3`'s spectrogram vs `output_test.flac`'s), plot a two-panel `matplotlib` comparison (log-magnitude, shared color scale, labeled axes) and save it to `docs/images/spectrogram_comparison.png`, overwriting any previous version. This is the one binary artifact you're permitted to write outside `fat_llama/tests/**` — see Scope restrictions below.
+Using the same `S_ref` (`input_test.flac`) and `S_out` (`output_test.flac`) data from the Spectral deviation score above, plot a two-panel `matplotlib` comparison: log-magnitude, shared color scale, labeled axes, and **the same zoom level on both panels** — identical x-axis (time) and y-axis (frequency) limits, ticks, and aspect ratio on both, since these two spectrograms are only meaningful to compare side by side at matching scale (don't let one panel auto-scale to a different frequency/time range than the other). Save to `docs/images/spectrogram_comparison.png`, overwriting any previous version. This is the one binary artifact you're permitted to write outside `fat_llama/tests/**` — see Scope restrictions below.
 
 ## Fixing philosophy
 

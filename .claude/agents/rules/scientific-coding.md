@@ -2,6 +2,15 @@
 
 These are the rules `generate-code` follows. Edit this file to change its standard without touching the agent definition — programmers are expected to tune this over time.
 
+## Priorities
+
+We're trying to build an optimal audio upscaler — audio quality is the product, not a byproduct of clean code. When a target touches more than one of these, or you have to choose what's worth a same-cycle fix, order them:
+
+1. **Coherence and spectral accuracy, first.** Improving `audio-quality-checker`'s coherence and spectral-deviation scores is the top priority. This explicitly includes changing the DSP formula/algorithm itself — not just parameters or initialization conditions — when that's what a genuine improvement requires (e.g. replacing zero-order-hold interpolation with a bandlimited method, reshaping the IST harmonic term, adjusting thresholding behavior). A finding like "no measurable added detail" or "spectral imaging artifacts" is exactly the kind of thing to fix at the algorithm level, not decline as a mere "design decision" — you have standing to change the documented method's specifics as long as you stay within the DSP/IST-FFT method in `.claude/rules/project-mission.md` (no AI/ML mechanism, still CUDA/CuPy) and update `README.md`'s Algorithm Explanation / relevant docstrings to match what you actually shipped. If a fix would invalidate a committed reference asset (e.g. `input_test.flac`) that's outside your `fat_llama/**` write scope, say so explicitly in `notes` and flag it for the coordinator/user rather than silently declining the whole fix — the algorithm change and the reference-asset update are separable.
+
+   You may also propose a different `upscale()` parameter set (`max_iterations`, `threshold_value`, `target_bitrate_kbps`, the `toggle_*` flags) as a lighter-weight lever than a code change, when you have a specific, reasoned basis for expecting it to score better (not a guess to try something) — report it in `proposed_upscale_params` (output contract below). This is a *proposal*, not something you run yourself: you don't have `audio-quality-checker`'s ~20-minute baseline pipeline in your own loop, so you can't verify the score effect directly — the coordinator relays your proposal to the next `audio-quality-checker` dispatch, which runs it once and reports back. State your reasoning for the proposed values in `notes` so a reviewer (human or the coordinator) can judge it before it's used to grade anything.
+2. **PEP8 and code tests, second.** Still worth fixing when safe and mechanical, but never at the expense of an available audio-quality improvement, and never as a reason to defer one.
+
 ## The method (the loop)
 
 Nothing gets edited until step 2 is written down.
@@ -36,12 +45,14 @@ Your final message must be *only* this JSON — no prose before or after it:
     "evidence": "which test(s) proved/disproved the hypothesis, and the full-suite result"
   },
   "factblock_stale": ["fat_llama/audio_fattener/feed.py"],
+  "proposed_upscale_params": null,
   "notes": "anything a reviewer or coordinator should know — iterations taken, environmental caveats, follow-ups"
 }
 ```
 
 - `changes` is empty only if you concluded no code change was needed (e.g. the target turned out to be a misunderstanding, not a bug).
 - `factblock_stale` lists files you edited that `docs/CURRENT_STATE.md` now describes incorrectly (empty list if the factblock wasn't touched or doesn't exist). Regenerating it is a separate, user-triggered step (`/review-current-state`) — not this agent's job.
+- `proposed_upscale_params`: `null` by default. When you have a specific, reasoned case (per Priorities above) that a different `upscale()` parameter set would score better on the next `audio-quality-checker` run, set this to the full kwargs object (`{"max_iterations": ..., "threshold_value": ..., "target_bitrate_kbps": ..., "toggle_normalize": ..., "toggle_autoscale": ..., "toggle_adaptive_filter": ...}`) and explain your reasoning in `notes`. You are proposing, not verifying — you don't run the baseline pipeline yourself.
 
 ## Fixing philosophy
 
