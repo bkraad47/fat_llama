@@ -6,7 +6,9 @@ disable-model-invocation: true
 model: sonnet
 ---
 
-Before doing anything else, read `.claude/skills/rules/iterate-fat-llama.md` in full — it defines the cycle cap, score formula, naming conventions, version-bump policy, and remote-action confirmation requirement referenced throughout the steps below, and may be updated over time without this file changing. Also read `.claude/rules/scope-and-safety.md` for the filesystem write scope and safety boundaries every skill/agent follows.
+Before doing anything else, read `.claude/skills/rules/iterate-fat-llama.md` in full — it defines the cycle cap, score formula, naming conventions, version-bump policy, and remote-action confirmation requirement referenced throughout the steps below, and may be updated over time without this file changing. Also read `.claude/rules/scope-and-safety.md` for the filesystem write scope and safety boundaries every skill/agent follows, and `.claude/rules/project-mission.md` for what fat_llama actually is and how it works.
+
+Also read `README.md` at the repo root in full, right now, before Step 0 — it's fat_llama's own description of its purpose and method (iterative soft thresholding of FFT data to upscale compressed audio across supported formats, tested and built primarily against the MP3→FLAC outcome, CUDA-only, deliberately without AI/ML-based upscaling). Carry that context — condensed per `.claude/rules/project-mission.md` — into every `generate-code` dispatch in step (d) below and into the docs/changelog/PR steps that follow, so nothing drifts toward an out-of-scope "fix".
 
 `args` is optional free-text directives on what to fix or not fix (e.g. "focus on bitrate accuracy, don't touch the CLI"). Handle it per the DIRECTIVES rule in `.claude/skills/rules/iterate-fat-llama.md`.
 
@@ -18,10 +20,11 @@ Before Step 0, open this run's log file per `.claude/rules/logging.md` (name: `i
 
 ## Step 0 — setup
 
-1. `git status`. If there are uncommitted changes that aren't something you just made in this run, stop and ask the user before doing anything else — don't stash or discard in-progress work.
-2. Record the starting branch as `BASE_BRANCH` and current HEAD as `BASE_COMMIT`.
-3. Create a new branch per the naming convention in `.claude/skills/rules/iterate-fat-llama.md` and switch to it. Tell the user you've switched branches — `BASE_BRANCH` is left untouched for the rest of this run.
-4. Tag the untouched starting state per that same naming convention (`iter-0`). This is candidate `C_0`.
+1. Read `README.md` in full (if not already done per the note above) and log a one-line entry recording that the run's mission context is fat_llama's own README plus `.claude/rules/project-mission.md`.
+2. `git status`. If there are uncommitted changes that aren't something you just made in this run, stop and ask the user before doing anything else — don't stash or discard in-progress work.
+3. Record the starting branch as `BASE_BRANCH` and current HEAD as `BASE_COMMIT`.
+4. Create a new branch per the naming convention in `.claude/skills/rules/iterate-fat-llama.md` and switch to it. Tell the user you've switched branches — `BASE_BRANCH` is left untouched for the rest of this run.
+5. Tag the untouched starting state per that same naming convention (`iter-0`). This is candidate `C_0`.
 
 ## Steps 1–4 — the iteration loop (up to MAX_CYCLES)
 
@@ -38,7 +41,7 @@ For `i = 1..MAX_CYCLES` (see the cycle policy in `.claude/skills/rules/iterate-f
 
 **c. Check for early stop.** If `score_i == 1.0` (every audio-quality check passed), `C_{i-1}` is already satisfactory — stop the loop immediately without running a fix this cycle, and go straight to Step 5 with the working tree exactly as it is.
 
-**d. Fix.** Otherwise, launch the `generate-code` subagent (Agent tool, `subagent_type: "generate-code"`, `run_in_background: false`) with a prompt containing: the full `test-fat-llama` JSON from (b), and `DIRECTIVES` verbatim if non-empty — ask it to address the reported test/quality/audio findings within those directives.
+**d. Fix.** Otherwise, launch the `generate-code` subagent (Agent tool, `subagent_type: "generate-code"`, `run_in_background: false`) with a prompt containing: the full `test-fat-llama` JSON from (b), `DIRECTIVES` verbatim if non-empty, and the condensed mission context from `.claude/rules/project-mission.md` (mp3→flac via IST on FFT data; no AI/ML-based upscaling) — ask it to address the reported test/quality/audio findings within those directives and that constraint.
 
 **e. Checkpoint.** Commit whatever `generate-code` changed (`git add -A && git commit -m "iterate-fat-llama: cycle <i> fix"`) and tag the result per the naming convention (`<branch>/iter-<i>`) — this is candidate `C_i`. If `generate-code` reported no changes were needed, still tag current HEAD as `<branch>/iter-<i>` (so `C_i == C_{i-1}`, which will simply score the same next cycle).
 

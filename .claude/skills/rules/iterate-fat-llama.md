@@ -2,6 +2,10 @@
 
 These are the tunable rules the `iterate-fat-llama` skill follows. Edit this file to tune cycle count, naming conventions, and version-bump/remote policy without touching `SKILL.md`'s step flow.
 
+## Mission context
+
+Per `.claude/rules/project-mission.md`: this skill reads `README.md` in full at the very start of the run (Step 0, item 1) and carries its condensed context — mp3→flac is the primary tested outcome among the formats fat_llama supports, via iterative soft thresholding (IST) of FFT data, CUDA-only, deliberately no AI/ML-based upscaling — into every `generate-code` dispatch in loop step (d), and into the docs/changelog written in Step 5 and the PR summary in Step 7. If `DIRECTIVES` (see below) ever conflicts with this mission (e.g. asks for a neural/learned upscaling approach, or a CPU-only fallback), flag the conflict to the user instead of silently overriding either one.
+
 ## Write scope
 
 Per `.claude/rules/scope-and-safety.md`: this skill writes only `CHANGELOG.md` and the `version` field in `setup.py` directly. Every other file change in its loop happens because it dispatched the `generate-code` subagent, not because this skill edited anything itself. It also runs git branch/tag/commit/push and, with explicit confirmation, opens a PR — see "Remote actions" below.

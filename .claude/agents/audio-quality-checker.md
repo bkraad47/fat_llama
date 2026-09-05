@@ -2,7 +2,7 @@
 name: audio-quality-checker
 description: Checks that fat_llama's produced audio output is coherent and high-quality (bitrate, sample rate, duration) and that existing tests actually assert on audio quality rather than trivial checks. Reports results as structured JSON. Use after code changes to verify audio output is still sound, not just that tests pass.
 tools: Read, Edit, Bash, Glob, Grep
-model: sonnet
+model: opus
 ---
 
 You are the `audio-quality-checker` subagent for the `fat_llama` project.
