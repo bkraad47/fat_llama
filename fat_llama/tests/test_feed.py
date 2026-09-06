@@ -6,8 +6,10 @@ import numpy as np
 import soundfile as sf
 
 from fat_llama.audio_fattener.feed import (
-    apply_original_nyquist_cutoff, iterative_soft_thresholding, lms_filter,
-    new_interpolation_algorithm, read_audio, upscale, write_audio
+    MAX_REALISTIC_SAMPLE_RATE_HZ, _lms_block_ranges,
+    apply_original_nyquist_cutoff, compute_upscale_factor,
+    iterative_soft_thresholding, lms_filter, new_interpolation_algorithm,
+    read_audio, upscale, write_audio
 )
 
 
@@ -160,6 +162,92 @@ class TestAudioFattener(unittest.TestCase):
         finally:
             if os.path.exists(output_file):
                 os.remove(output_file)
+
+    def test_compute_upscale_factor_bounds_realistic_sample_rate(self):
+        # Regression test for issue #20: upscale() with target_bitrate_kbps
+        # values well within their documented valid range (800-1411 for
+        # flac, 800-6444 for wav) against a typical compressed mp3 source
+        # bitrate (128-192 kbps) used to derive an unbounded ratio
+        # (round(target_bitrate_kbps * 1000 / source_bitrate)) that
+        # regularly landed at 5-7+, driving output sample rates past
+        # 250-300 kHz -- far outside any realistic playback/DAC rate.
+        # compute_upscale_factor is pure Python (no CuPy/CUDA dependency),
+        # so this exercises the actual shipped fix directly, without
+        # needing a GPU.
+        sample_rate = 44100
+
+        # The issue's own reported scenario: target_bitrate_kbps=900 (and
+        # a nearby 1400) against typical compressed mp3 bitrates. The old
+        # formula (round(900_000 / 128_000) = 7, round(1_400_000 /
+        # 192_000) = 7) drove sample_rate * 7 = 308700 Hz.
+        for source_bitrate_bps, target_bitrate_kbps in (
+            (128000, 900), (192000, 1400), (64000, 800), (320000, 1411),
+        ):
+            factor = compute_upscale_factor(
+                sample_rate, source_bitrate_bps, target_bitrate_kbps
+            )
+            new_sample_rate = sample_rate * factor
+            self.assertGreaterEqual(
+                factor, 1,
+                "compute_upscale_factor must never derive a downscale "
+                f"(factor={factor} for source_bitrate={source_bitrate_bps}"
+                f", target_bitrate_kbps={target_bitrate_kbps})."
+            )
+            self.assertLessEqual(
+                new_sample_rate, MAX_REALISTIC_SAMPLE_RATE_HZ,
+                f"compute_upscale_factor produced an unrealistic sample "
+                f"rate ({new_sample_rate} Hz) for source_bitrate="
+                f"{source_bitrate_bps}, target_bitrate_kbps="
+                f"{target_bitrate_kbps}; this reproduces issue #20's "
+                "unrealistic sample rate/bitrate report."
+            )
+
+        # Unknown source bitrate falls back to a small, bounded factor
+        # rather than raising or defaulting to something unbounded.
+        fallback_factor = compute_upscale_factor(sample_rate, None, 1400)
+        self.assertGreaterEqual(fallback_factor, 1)
+        self.assertLessEqual(
+            sample_rate * fallback_factor, MAX_REALISTIC_SAMPLE_RATE_HZ
+        )
+
+        # An already-high-bitrate source (e.g. a lossless/high-bitrate
+        # input) must clamp to a factor of 1 (no downscale), not derive a
+        # fractional/zero factor.
+        self.assertEqual(
+            compute_upscale_factor(sample_rate, 1300000, 800), 1
+        )
+
+        # A source sample rate already at or above the realistic ceiling
+        # must not be upscaled further.
+        self.assertEqual(
+            compute_upscale_factor(192000, 64000, 1400), 1
+        )
+
+    def test_lms_block_ranges_partitions_range_exactly(self):
+        # Regression test for the block-partitioning logic behind
+        # lms_filter's block-adaptive update (issue #20's runtime fix):
+        # _lms_block_ranges must cover [start, n) exactly once, in order,
+        # with no gaps or overlaps, and every block except possibly the
+        # last must be exactly block_size long. This is pure Python (no
+        # CuPy), so it directly exercises the shipped partitioning logic
+        # without needing a GPU -- the per-block filtering math itself
+        # still requires cp.ndarray input and is covered by lms_filter's
+        # own (GPU-gated) regression tests.
+        for start, n, block_size in (
+            (33, 1000, 256), (0, 10, 3), (5, 5, 4), (0, 1, 1), (10, 11, 5),
+        ):
+            ranges = list(_lms_block_ranges(start, n, block_size))
+            covered = []
+            for block_start, block_end in ranges:
+                self.assertLess(block_start, block_end)
+                self.assertLessEqual(block_end - block_start, block_size)
+                covered.extend(range(block_start, block_end))
+            self.assertEqual(
+                covered, list(range(start, n)),
+                f"_lms_block_ranges(start={start}, n={n}, "
+                f"block_size={block_size}) does not exactly partition "
+                "[start, n) -- found a gap or overlap."
+            )
 
     @requires_gpu
     def test_lms_filter_no_extended_warmup_dropout(self):
@@ -513,14 +601,12 @@ class TestAudioFattener(unittest.TestCase):
         # (via two target_bitrate_kbps values) since the cutoff's
         # correctness depends on the original/new sample-rate ratio, not
         # just a single hard-coded case. toggle_adaptive_filter=False and
-        # max_iterations=2 keep this fast (lms_filter's per-sample Python
-        # loop is slow -- see feed.py's own notes). Uses target_format=
-        # 'wav' rather than 'flac': this source's deterministic LAME CBR
-        # encode (64 kbps) combined with a high target_bitrate_kbps drives
-        # a large enough upscale_factor that the resulting sample rate
-        # exceeds FLAC's ~655350 Hz format ceiling (a pre-existing,
-        # unrelated libsndfile/FLAC limitation) -- WAV has no such low
-        # ceiling and is an equally valid target_format for this check.
+        # max_iterations=2 keep this fast. Uses target_format='wav' rather
+        # than 'flac' -- both are equally valid target_formats for this
+        # check; as of the issue #20 fix, compute_upscale_factor's
+        # realistic-sample-rate ceiling means this no longer risks
+        # approaching FLAC's own separate ~655350 Hz format ceiling
+        # either way.
         original_nyquist = 44100 / 2.0
 
         for target_bitrate_kbps in (800, 1400):
@@ -581,29 +667,34 @@ class TestAudioFattener(unittest.TestCase):
                     os.remove(output_file)
 
     @requires_gpu
-    def test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate(
+    def test_target_bitrate_kbps_drives_bounded_realistic_upscale_factor(
         self
     ):
-        # Regression test documenting the intended contract of
-        # target_bitrate_kbps: it is used only to derive upscale_factor
-        # relative to the source file's own bitrate
-        # (upscale_factor = round(target_bitrate_kbps * 1000 / source
-        # bitrate)); its 800-1411 (flac) valid range is a sanity bound on
-        # this parameter itself, not a promise about the produced file's
-        # real bitrate. The output is always written as uncompressed PCM
-        # (write_audio) at an upsampled sample rate, so its actual bitrate
-        # is, by design, substantially higher than target_bitrate_kbps
-        # once upscale_factor > 1 -- audio-quality-checker measured this
-        # divergence (target 1400 kbps vs. ~7822 kbps effective output) and
-        # flagged it; this test confirms the divergence is a documented,
-        # structural consequence of writing uncompressed high-resolution
-        # PCM, not an upscale_factor computation bug.
+        # Regression test for issue #20, documenting the fixed contract of
+        # target_bitrate_kbps: it still drives upscale_factor relative to
+        # the source file's own bitrate (see compute_upscale_factor), but
+        # the derived factor is now clamped so the output sample rate
+        # never exceeds MAX_REALISTIC_SAMPLE_RATE_HZ. Before this fix, the
+        # unbounded ratio drove sample rates past 250-300 kHz and an
+        # effective output bitrate of ~7822 kbps for a comparable input
+        # (audio-quality-checker measurement); this test confirms both the
+        # sample rate and the real output bitrate now stay within a
+        # realistic range end-to-end, not just at the compute_upscale_
+        # factor unit level.
         _, _, source_bitrate, _ = read_audio(
             self.test_mp3_file, audio_format='mp3'
         )
-        target_bitrate_kbps = 800  # minimum of the valid flac range
-        expected_upscale_factor = round(
-            target_bitrate_kbps * 1000 / source_bitrate
+        target_bitrate_kbps = 1400  # near the top of the valid flac range,
+        # deliberately chosen because it is exactly the kind of value that
+        # used to drive an oversized upscale_factor (e.g. round(1400 / 192)
+        # = 7) against a typical compressed source bitrate.
+        expected_upscale_factor = compute_upscale_factor(
+            44100, source_bitrate, target_bitrate_kbps
+        )
+        self.assertLessEqual(
+            44100 * expected_upscale_factor, MAX_REALISTIC_SAMPLE_RATE_HZ,
+            "Test setup assumption violated: compute_upscale_factor should "
+            "never derive a sample rate above the realistic ceiling."
         )
 
         output_file = 'test_output_bitrate.flac'
@@ -622,13 +713,19 @@ class TestAudioFattener(unittest.TestCase):
             )
 
             info = sf.info(output_file)
-            # The output sample rate must reflect the documented
-            # upscale_factor formula (source_sample_rate * upscale_factor).
+            # The output sample rate must reflect compute_upscale_factor's
+            # bounded formula (source_sample_rate * upscale_factor), and
+            # must itself stay within the realistic ceiling end-to-end.
             self.assertEqual(
                 info.samplerate, 44100 * expected_upscale_factor,
-                "Output sample rate does not match the documented "
-                "upscale_factor = round(target_bitrate_kbps * 1000 / "
-                "source bitrate) formula."
+                "Output sample rate does not match compute_upscale_factor's "
+                "formula."
+            )
+            self.assertLessEqual(
+                info.samplerate, MAX_REALISTIC_SAMPLE_RATE_HZ,
+                f"Output sample rate ({info.samplerate} Hz) exceeds the "
+                "realistic playback ceiling; reproduces issue #20's "
+                "unrealistic sample rate report."
             )
 
             # The upscaled output must also be coherent *audio*, not just a
@@ -674,17 +771,24 @@ class TestAudioFattener(unittest.TestCase):
             real_bitrate_kbps = (
                 os.path.getsize(output_file) * 8 / info.duration / 1000
             )
-            # By design (uncompressed PCM at an upsampled rate), the real
-            # output bitrate must be well above target_bitrate_kbps even
-            # at the minimum of the valid range -- this is the documented,
-            # intentional divergence, not a defect to eliminate.
-            self.assertGreater(
-                real_bitrate_kbps, target_bitrate_kbps * 2,
-                "Expected the real output bitrate to substantially exceed "
-                "target_bitrate_kbps (uncompressed PCM at an upsampled "
-                "rate); if this no longer holds, target_bitrate_kbps's "
-                "documented contract (a upscale_factor-derivation knob, "
-                "not an output bitrate promise) may have changed."
+            # The output is still uncompressed-PCM-then-FLAC-compressed at
+            # an upsampled rate, so its real bitrate need not equal
+            # target_bitrate_kbps -- but as of the issue #20 fix it must
+            # now stay within a realistic ceiling derived from the same
+            # MAX_REALISTIC_SAMPLE_RATE_HZ bound: 24-bit mono PCM at that
+            # rate is an absolute upper bound on what FLAC (lossless, so
+            # never larger than raw PCM) could produce; a small margin
+            # covers container/frame overhead.
+            max_realistic_bitrate_kbps = (
+                MAX_REALISTIC_SAMPLE_RATE_HZ * 24 / 1000
+            )
+            self.assertLessEqual(
+                real_bitrate_kbps, max_realistic_bitrate_kbps * 1.05,
+                f"Real output bitrate ({real_bitrate_kbps:.1f} kbps) "
+                "exceeds the realistic ceiling implied by "
+                f"MAX_REALISTIC_SAMPLE_RATE_HZ "
+                f"({max_realistic_bitrate_kbps:.1f} kbps); reproduces "
+                "issue #20's unrealistic bitrate report."
             )
         finally:
             if os.path.exists(output_file):
