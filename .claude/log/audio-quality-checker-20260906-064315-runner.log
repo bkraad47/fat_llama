@@ -1,0 +1,70 @@
+# audio-quality-checker run log — 20260906-064315 (UTC) — user: runner
+# branch: iterate-fat-llama/20260906-044742  commit: c015b9016621df6c65ab8bc137226e62612887a0
+
+### [06:43:15 UTC] Step 0 — Setup / git state confirmation
+Input: dispatch prompt (branch iterate-fat-llama/20260906-044742, commit c015b9016621df6c65ab8bc137226e62612887a0, no proposed_upscale_params -> baseline config); rules files .claude/agents/rules/audio-quality.md, .claude/rules/scope-and-safety.md.
+Action: read both rules files; git rev-parse HEAD (matches c015b90); git status (only .claude/log/*, docs/CURRENT_STATE.md dirty -- no source/test changes); nvidia-smi (not found) and cupy device probe (cudaErrorInsufficientDriver) => NO local CUDA GPU in this environment.
+Reasoning: local-GPU fallback is unavailable, so the remote fllm-mcp-server path is the only way to produce output_test.flac this cycle.
+Output: HEAD == requested commit; local env has no GPU; origin branch head was 57c1d8a (cycle-3 test_generate artifact commit), diverged from local c015b90.
+
+### [06:45:30 UTC] Step 0b — Push coordinator commit to origin
+Input: local HEAD c015b90 (coordinator's cycle-4 fix commit, not authored by me); origin head 57c1d8a.
+Action: verified 57c1d8a's only content (output_test.flac blob 2430263dd18861debe94efa98d603b8fa5631078) is byte-identical to the blob already present at c015b90 and that no files exist in 57c1d8a's tree that are absent from c015b90's (git diff --diff-filter=D empty). Then `git push --force-with-lease=...:57c1d8a origin HEAD:iterate-fat-llama/20260906-044742`.
+Reasoning: test_generate validates the commit against the live GitHub API, so c015b90 had to be on origin. Branch had diverged because the cycle-3 job's artifact commit landed after the coordinator committed cycle 4; a fast-forward push was impossible. Confirmed zero content loss before forcing, and used --force-with-lease pinned to the exact expected remote SHA. No commit was authored by me.
+Output: forced update 57c1d8a...c015b90; origin branch head now c015b9016621df6c65ab8bc137226e62612887a0.
+
+### [06:46:10 UTC] Step 6a — Dispatch remote GPU upscale (baseline config)
+Input: branch iterate-fat-llama/20260906-044742, commit c015b90..., params = fixed baseline (input_test.mp3 -> output_test.flac, mp3->flac, max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, normalize/autoscale/adaptive_filter all True).
+Action: mcp__fllm-mcp-server__test_generate with the above.
+Reasoning: rules require remote-GPU-first; no proposed params supplied so the pinned baseline is used verbatim (no parameter variation by me).
+Output: {"job_id":"3dadc0c68693479287647ed2cc2ce9f6","status":"queued"}
+
+### [06:48:40 UTC] Step 1 — Exercise read_audio/write_audio on a synthesized sample
+Input: /tmp/aqc/step1.py — pydub Sine(440, 44100), 3000ms, stereo, exported to mp3 @192k (same pattern as test_feed.py's create_test_mp3).
+Action: read_audio(mp3) then write_audio(flac) and write_audio(wav); inspected with soundfile.info, mutagen FLAC/MP3, and numpy.
+Reasoning: verify container properties (bitrate/sample rate/channels/duration) survive the read/write helpers before judging the full pipeline.
+Output: PASS. read_audio(mp3): sr=44100, shape=(132300,2), bitrate=191998 bps (192.0 kbps), channels=2, duration=3.000s, raw-PCM scale peak 31791.
+  write_audio(flac): PCM_24, sr=44100, ch=2, frames=132300, dur=3.000s; mutagen bitrate 457797 bps (FLAC-compressed, real 458.0 kbps vs 2117 kbps uncompressed PCM24 — expected for a pure sine, highly compressible); peak=1.000000, no NaN/Inf; round-trip relative RMS error 4.83e-8 (-146.3 dB) vs peak-normalized input.
+  clip fraction 2.50e-2 — inherent to a full-scale pure sine (theoretical 2.85% of a sine's samples exceed 0.999), not clipping introduced by write_audio.
+  write_audio(wav): PCM_24, sr/ch/dur preserved. write_audio(ogg): correctly raises ValueError("Unsupported target format: ogg").
+
+### [06:49:10 UTC] Step 2 — Test coherence review of fat_llama/tests/test_feed.py
+Input: fat_llama/tests/test_feed.py (1071 lines, 15 tests) at commit c015b90.
+Action: read every test's assertions; ran `python -m pytest fat_llama/tests/test_feed.py -q`.
+Reasoning: check whether assertions meaningfully verify audio *content* rather than mere file existence.
+Output: 4 passed, 11 skipped (all skips are @requires_gpu — this runner has no CUDA GPU), 0 failed. No incoherent tests found; no assertion edits made.
+  Every file-producing test now asserts content, not just existence: test_write_audio checks samplerate/channels/duration, waveform correlation >0.999 vs the peak-normalized input, dominant FFT bin ≈440 Hz, and clipped fraction <5%; test_read_audio checks sample count/ndim/channels/duration/bitrate range/finiteness/dominant frequency; the e2e upscale tests check derived sample rate vs compute_upscale_factor, duration, finiteness, RMS>1e-3, clip<5%, dominant frequency, and above-Nyquist energy.
+  Both IST regression tests (test_ist_harmonic_injection_bounded_across_iterations, test_ist_no_static_floor_in_quiet_segment) remain coherent and correctly-stated after cycle 4's removal of the harmonic term — they now assert properties the plain FFT/threshold/IFFT round trip satisfies, rather than referencing removed behaviour incorrectly.
+  Note (not a test defect): the only `os.path.exists` assertion left (test_write_audio line 104) is followed by 8 content assertions, so it is a precondition, not the substance of the test.
+
+### [06:47:55 UTC] Step 6b — Remote GPU job terminal state + output retrieval
+Input: job_id 3dadc0c68693479287647ed2cc2ce9f6.
+Action: polled get_test_generate_status to terminal; then `git fetch origin <branch>` and `git restore --source=1c2d6221e612af8d1119cf55a8173abd16916baa output_test.flac`.
+Reasoning: used `git restore` (worktree-only, no index/staging change) instead of `reset --hard` because the coordinator has uncommitted tracked edits (docs/CURRENT_STATE.md, its own run log) that `reset --hard` would have destroyed; 1c2d622 is a pure fast-forward from c015b90 touching only output_test.flac, so this is content-equivalent.
+Output: status=succeeded, push_status=succeeded, result_commit_sha=1c2d6221e612af8d1119cf55a8173abd16916baa (parent = c015b90, single file changed: output_test.flac).
+  Timing: created_at 06:44:45 -> updated_at 06:47:49 = 3 min 04 s total remote-job time (provisioning + clone + deps + full baseline upscale WITH toggle_adaptive_filter=True + upload + git push). Issue #20's ~27.5 min adaptive-filter runtime is confirmed fixed again this cycle.
+  Worker stderr: "Upscale factor set to: 4" (was 7 pre-fix), "Applying final Nyquist cutoff at 22050.0 Hz (original sample rate 44100 Hz)". No errors.
+
+### [06:52:00 UTC] Step 4/5/6c — Container properties, coherence checks, spectral analysis
+Input: /tmp/aqc/analyze.py + /tmp/aqc/extra.py against input_test.mp3, input_test.flac (reference), output_test.flac (this run's remote output).
+Action: measured container properties (soundfile/mutagen), above-original-Nyquist energy, clipping, dropouts, invalid samples, discontinuities, dynamic range, static-tone/drone persistence, per-band added detail + noise floor, then the fixed spectral-deviation algorithm.
+Reasoning: reconfirm issue #20's numbers and specifically test whether cycle 4's removal of IST's harmonic-reconstruction term cured the 98.168 Hz drone and the 57.1 -> 25.4 dB dynamic-range collapse.
+Output:
+  CONTAINER: output_test.flac sr=176400 Hz (= 44100 x 4; old broken value 308700 Hz), ch=2, dur=15.137 s (source mp3 15.177 s, reference flac 15.137 s), PCM_24, real bitrate 1875.9 kbps (old ~2391 kbps; uncompressed PCM24 equivalent 8467 kbps). Issue #20 symptoms CONFIRMED FIXED.
+  ABOVE ORIGINAL NYQUIST (22050 Hz): peak -119.1 dB and RMS -170.2 dB rel in-band peak; above-band/in-band energy ratio -129.1 dB. At the FFT noise floor -- PASS, precondition for a score above 5 satisfied.
+  CLIPPING: output 3.70e-5 of samples > 0.999 (reference itself 1.69e-4) -- output clips LESS than the reference. Raw (pre-alignment, stereo) 1.29e-4.
+  DROPOUTS: 0 runs >50 ms of |x|<1e-4 in either signal; 0 unmatched. INVALID SAMPLES: no NaN/Inf.
+  DISCONTINUITIES: 99.9th pct |diff| out 1.61e-2 vs ref 5.82e-2 (ratio 0.277); max |diff| out 4.28e-2 vs ref 2.52e-1. Output is smoother, as expected for a signal bandlimited to 22.05 kHz vs a 308.7 kHz reference. No click/pop proxy.
+  DYNAMIC RANGE: 100 ms-window RMS max/min range ref 57.1 dB, out 57.1 dB -- EXACT MATCH. (50 ms: 66.0/66.0; 400 ms: 37.2/37.2; quietest 400 ms window -45.5 dBFS in both.) The cycle-3 collapse to 25.4 dB is FULLY RESOLVED.
+  STATIC TONE / DRONE: no FFT bin above 20 Hz persistent in >95% of frames in either signal. At 98.168 Hz specifically, the quietest window measures -62.1 dB rel local peak in BOTH reference and output (identical) -- i.e. that energy is program content, not injected. The cycle-3 98.168 Hz drone is GONE.
+  ADDED DETAIL (bands, out - ref, dB): 0-100 -0.01, 100-500 -0.01, 500-2k +0.01, 2k-5k +0.11, 5k-10k +0.36, 10k-15k +1.05, 15k-22.05k +2.07. 5th-pct noise floor moves by the same amounts (+0.10/+0.47/+1.30/+2.92) and per-frame HF envelope correlation with the reference is 1.0000 (10-15k) / 0.9998 (15-22.05k) -- so the HF gain is a mild content-correlated shelf on existing content, NOT newly reconstructed detail, and NOT a broadband noise-floor rise (0-2 kHz is flat within 0.04 dB).
+  SPECTRAL DEVIATION (rules algorithm, stft nperseg=2048 noverlap=1024, per-spectrogram max normalization): spectral_convergence=0.9839, correlation=0.9999, combined=0.9919 -> DEVIATION SCORE 9.9 (previous cycle 9.3). Time-domain aligned waveform correlation 0.9998.
+  COHERENCE SCORE: 9.0 (previous cycle 7.0) -- every check clean, several better than the reference itself, but no clearly measurable *new* detail below the original Nyquist, so 8-9 band per the rubric rather than 10.
+
+### [06:53:30 UTC] Step 7 — Spectrogram comparison image
+Input: input_test.mp3, input_test.flac, output_test.flac; /tmp/aqc/spectro.py importing read_mp3/read_flac/normalize from analysis.py.
+Action: scipy.signal.spectrogram(nperseg=2048) per signal, data masked to f <= 22050 Hz (mp3 sample rate 44100 / 2) before plotting, 3 stacked shared-x panels, shared vmin=-120/vmax=0 colour scale and one colorbar; saved to docs/images/spectrogram_comparison.png.
+Reasoning: rules require analysis.py's own conventions and a hard cap (masked, not just axis-limited) at the original source Nyquist.
+Output: docs/images/spectrogram_comparison.png written (506575 bytes). Visual check: output panel tracks source/reference structure closely; no full-width horizontal line (the cycle-3 drone signature) anywhere in the output panel.
+
+### [06:54:00 UTC] DONE — Remote-GPU path used (job 3dadc0c6..., commit 1c2d622). Issue #20 reconfirmed fixed (176400 Hz, 1875.9 kbps, 3m04s with adaptive filter). Cycle 4's removal of IST's harmonic term fully resolved the 98.168 Hz drone and restored dynamic range to the reference's 57.1 dB. coherence 9.0 (was 7.0), spectral_deviation 9.9 (was 9.3). No test assertions needed changing.
