@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: Issue-Triage
     steps:
-      - name: Guard — parse issue number and confirm assignment
+      - name: Guard — parse issue number
         id: guard
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -23,13 +23,6 @@ jobs:
           ISSUE_NUMBER=$(echo "$BRANCH_NAME" | grep -ioE 'issue[-_]?[0-9]+' | grep -oE '[0-9]+' | head -n1 || true)
           if [ -z "$ISSUE_NUMBER" ]; then
             echo "Branch '$BRANCH_NAME' has no issue number — not an issue-linked branch, nothing to do."
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          ASSIGNEES=$(gh issue view "$ISSUE_NUMBER" --json assignees --jq '.assignees[].login' 2>/dev/null || true)
-          if ! echo "$ASSIGNEES" | grep -qx "bkraad47"; then
-            echo "Issue #$ISSUE_NUMBER is not assigned to bkraad47 — skipping."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
