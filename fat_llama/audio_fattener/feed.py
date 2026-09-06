@@ -225,6 +225,8 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     cp.ndarray: The processed audio data after IST.
     """
     data_thres = initialize_ist(data, threshold)
+    n = len(data_thres)
+    half = n // 2
 
     # The harmonic reconstruction term below is added to data_thres every
     # iteration, and data_thres carries forward from one iteration to the
@@ -256,14 +258,70 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     peak = float(cp.max(cp.abs(data)))
     harmonic_amplitude = (0.1 * peak) / max_iter if peak > 0 else 0.0
 
+    # Fixed sample phase for the harmonic term: an integer number of
+    # cycles fits exactly across the buffer (arange(n)/n is periodic at
+    # n, unlike the prior linspace(0, 2*pi, n)'s inclusive endpoint,
+    # which put n-1 steps between 0 and a repeated-looking 2*pi and so
+    # was not exactly periodic at the buffer boundary).
+    if n > 0:
+        phase = cp.arange(n, dtype=cp.float64) / n
+    else:
+        phase = cp.zeros(0, dtype=cp.float64)
+
     for _ in range(max_iter):
         data_fft = cp.fft.fft(data_thres)
         mask = cp.abs(data_fft) > threshold
         data_fft_thres = cp.where(mask, data_fft, 0)
         data_thres = cp.fft.ifft(data_fft_thres).real
 
-        # Harmonic reconstruction
-        harmonics = cp.sin(cp.linspace(0, 2 * cp.pi, len(data_thres)))
+        # Harmonic reconstruction: add an overtone of the signal's own
+        # dominant retained frequency component, instead of a fixed,
+        # buffer-length-independent single-cycle sinusoid. The prior
+        # cp.sin(cp.linspace(0, 2*pi, len(data_thres))) spans exactly
+        # ONE cycle across the WHOLE buffer no matter how long it is or
+        # what it contains -- for any real multi-thousand-sample
+        # upscaled buffer (e.g. ~15s at 176.4 kHz) that lands at a
+        # subsonic ~sample_rate/n frequency (~0.066 Hz measured), not
+        # audible, content-derived detail (found by audio-quality-
+        # checker: a non-source 0.066 Hz sine at -26.2 dBFS, IST's only
+        # measurable contribution). This function has no sample_rate
+        # parameter (data is expressed purely in samples), so the fix
+        # stays entirely in "cycles per buffer" terms: reuse this
+        # iteration's own FFT (data_fft/data_fft_thres, already computed
+        # above for the masking step) to find the dominant non-DC
+        # retained bin, and inject its first overtone (2x its bin index,
+        # one octave up) -- a standard harmonic-exciter DSP technique
+        # (synthesize an overtone of an existing partial) that ties the
+        # injected content to what the signal itself actually contains,
+        # rather than an arbitrary externally-imposed tone. This
+        # automatically tracks the input: a low-frequency-dominated
+        # buffer gets a low-frequency overtone, a high-frequency-
+        # dominated one gets a higher overtone, both expressed as a
+        # fraction of the buffer's own bin spacing rather than a fixed
+        # absolute frequency. Content this pushes above the original
+        # Nyquist frequency (e.g. overtones of already-high partials)
+        # is still removed by the pipeline's unconditional final
+        # apply_original_nyquist_cutoff stage, consistent with the
+        # "no content above the original Nyquist" hard constraint.
+        if half > 1:
+            retained_magnitudes = cp.abs(data_fft_thres[1:half])
+            if float(cp.max(retained_magnitudes)) > 0:
+                dominant_bin = int(cp.argmax(retained_magnitudes)) + 1
+            else:
+                # Degenerate case: nothing survived thresholding in
+                # either domain (e.g. a near-silent segment), so there
+                # is no retained content to take an overtone of. Fall
+                # back to a fixed mid-band bin (roughly a quarter of the
+                # way to this buffer's own Nyquist bin) rather than bin
+                # 1 -- at real buffer lengths, bin 1 is exactly the
+                # subsonic ~sample_rate/n frequency this fix removes,
+                # and this fallback should not reintroduce it.
+                dominant_bin = max(1, half // 4)
+            harmonic_bin = min(2 * dominant_bin, half - 1)
+        else:
+            harmonic_bin = 1
+
+        harmonics = cp.sin(2 * cp.pi * harmonic_bin * phase)
         data_thres += harmonic_amplitude * harmonics
 
     return data_thres
