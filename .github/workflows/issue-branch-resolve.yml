@@ -20,9 +20,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH_NAME: ${{ github.event.ref }}
         run: |
-          ISSUE_NUMBER=$(echo "$BRANCH_NAME" | grep -oE '^[0-9]+' || true)
+          ISSUE_NUMBER=$(echo "$BRANCH_NAME" | grep -ioE 'issue[-_]?[0-9]+' | grep -oE '[0-9]+' | head -n1 || true)
           if [ -z "$ISSUE_NUMBER" ]; then
-            echo "Branch '$BRANCH_NAME' has no leading issue number — not an issue-linked branch, nothing to do."
+            echo "Branch '$BRANCH_NAME' has no issue number — not an issue-linked branch, nothing to do."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
