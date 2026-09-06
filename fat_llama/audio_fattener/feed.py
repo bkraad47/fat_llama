@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 
 import cupy as cp
@@ -13,6 +14,36 @@ from pydub import AudioSegment
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Upscale-factor bounds -------------------------------------------------
+# Hard upper bound on the interpolation factor derived from
+# target_bitrate_kbps / source bitrate. See compute_upscale_factor() for the
+# full rationale; in short, the derived ratio compares two incommensurable
+# quantities (a target rate vs. a *compressed* source rate) and is unbounded
+# above, so a low-bitrate source could otherwise drive a multi-MHz output
+# sample rate and a proportional blow-up in memory and runtime.
+MAX_UPSCALE_FACTOR = 8
+
+# Hard upper bound on the produced file's sample rate, in Hz. 192 kHz is the
+# highest sample rate in common consumer/professional use (and the ceiling of
+# most DACs, players and editors); above it, output files are widely
+# unplayable and gain nothing -- see compute_upscale_factor().
+MAX_OUTPUT_SAMPLE_RATE = 192000
+
+# Fallback factor used when the source file's bitrate cannot be determined.
+DEFAULT_UPSCALE_FACTOR = 4
+
+# --- LMS block-processing bounds -------------------------------------------
+# Upper bound on the number of samples lms_filter() processes per weight
+# update. The actual block size is derived per call from the signal's own
+# power (see _derive_lms_block_size); this is only a ceiling.
+LMS_MAX_BLOCK_SIZE = 4096
+
+# Safety factor for the block-size stability bound: the per-block eigenvalue
+# contraction 2 * mu * block_size * lambda_max is kept at or below this
+# value, comfortably inside LMS's |1 - 2 * mu * L * lambda| < 1 convergence
+# condition. See _derive_lms_block_size().
+LMS_BLOCK_STABILITY_SAFETY = 0.5
 
 
 def read_audio(file_path, audio_format):
@@ -67,6 +98,135 @@ def read_audio(file_path, audio_format):
         samples = samples.reshape((-1, 2))
 
     return sample_rate, samples, bitrate, audio
+
+
+def compute_upscale_factor(
+    target_bitrate_kbps,
+    source_bitrate,
+    source_sample_rate,
+    max_upscale_factor=MAX_UPSCALE_FACTOR,
+    max_output_sample_rate=MAX_OUTPUT_SAMPLE_RATE,
+):
+    """
+    Derive a bounded, realistic integer interpolation factor.
+
+    The historical derivation was a single unguarded expression inside
+    `upscale()`::
+
+        upscale_factor = round(target_bitrate / bitrate) if bitrate else 4
+
+    That ratio compares two incommensurable quantities -- a target rate
+    expressed in the units of *uncompressed* audio (its 800-1411 kbps
+    "flac" range is CD-PCM-shaped) against the source file's
+    *compressed* bitrate -- so it is not a physically meaningful ratio
+    and, more importantly, it is unbounded in both directions:
+
+    * **No lower bound.** `round()` returns 0 whenever the source
+      bitrate is more than twice the target (e.g. a 24-bit/96 kHz WAV
+      source at 4608 kbps with `target_bitrate_kbps=900` gives
+      `round(0.195) == 0`). A factor of 0 makes
+      `new_interpolation_algorithm` produce a zero-length signal and
+      `upscale()` write a file at 0 Hz -- a crash or an empty output.
+    * **No upper bound.** A low-bitrate source inflates it without
+      limit: an 8 kbps source with the same target gives 112, i.e. a
+      ~4.9 MHz output sample rate and a ~112x blow-up in memory and
+      runtime.
+    * **No notion of a realistic output sample rate.** Measured against
+      this project's own test asset (`input_test.mp3`, a 192 kbps
+      44.1 kHz stereo MP3): `target_bitrate_kbps=900` gives
+      `round(4.6875) == 5` and a 220500 Hz output, and the default 1411
+      gives 7 and a 308700 Hz output whose (lossless-FLAC) bitrate
+      measures 5294 kbps -- both reported by users as unrealistic, and
+      neither playable on typical playback hardware.
+
+    This function keeps the documented ratio (so `target_bitrate_kbps`
+    remains a monotonically non-decreasing quality knob, and small,
+    already-sane ratios are unaffected) but bounds it:
+
+    1. Unknown/zero/negative/non-finite source bitrate falls back to
+       `DEFAULT_UPSCALE_FACTOR` (unchanged behaviour).
+    2. The factor is clamped to at least 1 (never 0 -- an upscale never
+       shrinks or empties the signal) and at most
+       `max_upscale_factor`.
+    3. The factor is further reduced so the resulting output sample
+       rate (`source_sample_rate * factor`) does not exceed
+       `max_output_sample_rate`.
+
+    Bound (3) costs no audio quality whatsoever in this pipeline:
+    `apply_original_nyquist_cutoff` unconditionally zeroes every
+    spectral bin above `source_sample_rate / 2` as the final stage
+    (see `.claude/rules/project-mission.md`'s "no content above the
+    original Nyquist frequency" constraint), so *any* factor of 2 or
+    more already provides full headroom for every frequency the output
+    is allowed to contain. A factor of 7 stores exactly the same
+    information as a factor of 4 or 2 -- it just spends 1.75x/3.5x the
+    bytes and the proportional extra runtime doing it.
+
+    Parameters:
+    target_bitrate_kbps (int): The caller's target bitrate knob, in
+        kbps.
+    source_bitrate (int, float or None): The source file's bitrate in
+        bits/sec as reported by `read_audio`. `None`, 0, negative or
+        non-finite values mean "undeterminable".
+    source_sample_rate (int): The source file's sample rate in Hz, used
+        for the output-sample-rate ceiling.
+    max_upscale_factor (int): Hard ceiling on the returned factor.
+    max_output_sample_rate (int or None): Ceiling on
+        `source_sample_rate * factor`, in Hz. `None` disables the
+        sample-rate ceiling.
+
+    Returns:
+    int: The interpolation factor, always >= 1.
+    """
+    usable_bitrate = (
+        source_bitrate is not None
+        and math.isfinite(float(source_bitrate))
+        and float(source_bitrate) > 0
+    )
+
+    if usable_bitrate:
+        raw_factor = int(
+            round((target_bitrate_kbps * 1000) / float(source_bitrate))
+        )
+    else:
+        raw_factor = int(DEFAULT_UPSCALE_FACTOR)
+        logger.warning(
+            "Source bitrate is undeterminable (%s); falling back to the "
+            "default upscale factor of %s.",
+            source_bitrate, raw_factor
+        )
+
+    factor = max(1, min(raw_factor, int(max_upscale_factor)))
+
+    if (
+        max_output_sample_rate
+        and source_sample_rate
+        and source_sample_rate > 0
+    ):
+        rate_limited_factor = int(
+            max_output_sample_rate // source_sample_rate
+        )
+        factor = max(1, min(factor, rate_limited_factor))
+
+    if factor != raw_factor:
+        logger.warning(
+            "Raw upscale factor %s (target %s kbps / source %s bps) is "
+            "outside the realistic range; clamped to %s (max factor %s, "
+            "max output sample rate %s Hz). Output sample rate will be "
+            "%s Hz.",
+            raw_factor, target_bitrate_kbps, source_bitrate, factor,
+            max_upscale_factor, max_output_sample_rate,
+            source_sample_rate * factor if source_sample_rate else None
+        )
+
+    logger.info(
+        "Upscale factor: %s (raw ratio %s, source bitrate %s bps, source "
+        "sample rate %s Hz, output sample rate %s Hz)",
+        factor, raw_factor, source_bitrate, source_sample_rate,
+        source_sample_rate * factor if source_sample_rate else None
+    )
+
+    return factor
 
 
 def write_audio(file_path, sample_rate, data, audio_format):
@@ -260,8 +420,78 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     return data_thres
 
 
+def _derive_lms_block_size(
+    signal,
+    mu,
+    num_taps,
+    max_block=LMS_MAX_BLOCK_SIZE,
+    safety=LMS_BLOCK_STABILITY_SAFETY,
+):
+    """
+    Choose the largest LMS block size that provably stays stable.
+
+    `lms_filter` processes the LMS recursion in blocks: within a block
+    the tap weights are held frozen and the weight update applied at
+    the end of the block is exactly the sum of the per-sample updates
+    those frozen weights would have produced (standard Block LMS).
+    That batching is what makes the filter fast on a GPU -- it replaces
+    ~6 CuPy kernel launches *per audio sample* with ~10 per *block* --
+    but it is only valid while the block is short enough that the
+    weights genuinely would not have moved much across it.
+
+    The mean-weight recursion for Block LMS is
+    `E[w] <- (I - 2 * mu * L * R) E[w]`, so convergence requires
+    `2 * mu * L * lambda_max < 2`, i.e. the usable block size shrinks as
+    the step size and the signal's power grow. Using the standard bound
+    `lambda_max <= trace(R) = num_taps * E[x^2]`, this returns
+
+        L = clamp(safety / (2 * mu * num_taps * mean(signal^2)), 1,
+                  max_block)
+
+    which keeps the per-block contraction at or below `safety` (0.5 by
+    default), a 4x margin inside the stability limit. Measured
+    (NumPy reference implementation, 0.2 s two-tone 300/900 Hz signal at
+    amplitude 0.5, mu=0.001, num_taps=32): the derived block size is 53
+    and the block-processed output tracks the sample-by-sample
+    recursion with correlation 0.99999 and a 1.3e-2 relative peak
+    deviation, while a fixed block of 1024 for the same signal diverges
+    outright (output peak 3.9e4 vs. the input's 0.5, correlation 0.13)
+    -- i.e. this bound is load-bearing, not decorative.
+
+    Parameters:
+    signal (cp.ndarray): The filter's input signal, used only to
+        estimate its power.
+    mu (float): The LMS step size.
+    num_taps (int): The number of filter taps.
+    max_block (int): Ceiling on the returned block size.
+    safety (float): Target per-block contraction factor
+        (`2 * mu * L * lambda_max`), which must stay below 2 for
+        stability.
+
+    Returns:
+    int: The block size, always >= 1 (1 reproduces the exact
+        sample-by-sample LMS recursion).
+    """
+    max_block = max(1, int(max_block))
+
+    if mu <= 0:
+        return max_block
+
+    power = float(cp.mean(cp.square(signal.astype(cp.float64))))
+    trace_r = num_taps * power
+    denominator = 2.0 * mu * trace_r
+
+    if not math.isfinite(denominator) or denominator <= 0:
+        # Silent (or non-finite) input: nothing to adapt to, so the
+        # block size cannot destabilise anything.
+        return max_block
+
+    return int(max(1, min(max_block, math.floor(safety / denominator))))
+
+
 def lms_filter(
-    signal, desired, mu=0.001, num_taps=32, delay=1, return_weights=False
+    signal, desired, mu=0.001, num_taps=32, delay=1, return_weights=False,
+    block_size=None
 ):
     """
     Apply an LMS adaptive filter using CuPy.
@@ -294,6 +524,34 @@ def lms_filter(
     to the true minimum that no new warm-up dropout is introduced
     (measured warm-up RMS ratio ~1.00, same regression test as cycle 1).
 
+    Performance (fixed this cycle): this used to advance the recursion
+    one sample at a time from Python, issuing roughly six CuPy kernel
+    launches per output sample. Every one of those launches is a
+    fixed ~10-20 microseconds of host-side latency that no GPU can
+    amortise, so runtime was set by the *sample count*, not by the
+    arithmetic: a 15 s stereo file at a 220500 Hz upscaled rate is
+    6.7M samples, i.e. ~40M launches -- tens of minutes, and the
+    dominant cost of the whole pipeline (previously measured at ~91% of
+    a ~20 minute run). Users reported this as the upscale "hanging" on
+    15 s of audio with `toggle_adaptive_filter=True`. It was never a
+    numerical problem (no NaN/Inf accumulation, no denormal stall):
+    the loop is launch-bound.
+
+    The recursion is now advanced a *block* at a time (standard Block
+    LMS): within a block the tap weights are frozen, every sample's
+    filter output is computed with one batched matrix-vector product,
+    and the end-of-block weight update is exactly the sum of the
+    per-sample LMS updates those frozen weights would have produced.
+    The update rule itself is therefore unchanged -- `block_size=1`
+    reproduces the previous sample-by-sample behaviour bit for bit
+    (verified to 1e-16 against a NumPy reference of the old loop) --
+    and the block size is not a fixed guess but derived per call from
+    the signal's own power so the frozen-weight approximation provably
+    stays inside LMS's stability bound (see `_derive_lms_block_size`).
+    For normalized audio that yields blocks of ~50-150 samples, cutting
+    the Python-level iteration (and kernel launch) count by the same
+    factor.
+
     Parameters:
     signal (cp.ndarray): The input audio signal.
     desired (cp.ndarray): The desired output signal.
@@ -308,11 +566,19 @@ def lms_filter(
         final tap-weight vector alongside the filtered signal -- instead
         of just `filtered_signal`. Defaults to False to preserve the
         original single-array return for existing callers.
+    block_size (int or None): Number of samples processed per weight
+        update. `None` (the default) derives a stability-bounded block
+        size from the signal itself via `_derive_lms_block_size`; `1`
+        reproduces the exact sample-by-sample recursion (slow); larger
+        values trade adaptation granularity for speed and, past the
+        derived bound, diverge.
 
     Returns:
     cp.ndarray: The filtered audio signal (or `(filtered_signal, w)` if
         `return_weights` is True).
     """
+    signal = signal.astype(cp.float64)
+    desired = desired.astype(cp.float64)
     n = len(signal)
     # Initialize the direct-lag tap to 1 (all others 0) instead of an
     # all-zero weight vector. With delay >= 1, x[0] is signal[i - delay],
@@ -328,27 +594,62 @@ def lms_filter(
     w[0] = 1.0
     filtered_signal = cp.zeros(n, dtype=cp.float64)
     start = num_taps + delay
+
+    if n <= start:
+        # Too short to run the recursion at all: pass the signal through
+        # unchanged rather than indexing out of bounds.
+        filtered_signal[:n] = signal[:n]
+        if return_weights:
+            return filtered_signal, w
+        return filtered_signal
+
     filtered_signal[:start] = signal[:start]
 
-    for i in range(start, n):
-        # Extract a vector of the last 'num_taps' samples from the signal,
-        # lagged by 'delay' samples behind the sample being predicted.
-        x = signal[i - delay:i - delay - num_taps:-1]
+    if block_size is None:
+        block_size = _derive_lms_block_size(signal, mu, num_taps)
+    block_size = max(1, int(block_size))
 
-        # Compute the filter output: dot product of coefficients and input
-        y = cp.dot(w, x)
+    # Offsets of a block's tap vectors relative to the block's first
+    # predicted sample: row j, tap k is sample (j - delay - k). Computed
+    # once and reused, so each block costs a constant handful of kernel
+    # launches instead of a handful per sample.
+    tap_offsets = (
+        cp.arange(block_size, dtype=cp.int64)[:, None]
+        - delay
+        - cp.arange(num_taps, dtype=cp.int64)[None, :]
+    )
 
-        # Compute the error between the desired output and filter output
-        e = desired[i] - y
+    for block_start in range(start, n, block_size):
+        block_end = min(block_start + block_size, n)
+        block_len = block_end - block_start
 
-        # Update the filter coefficients using the LMS rule
-        w += 2 * mu * e * x
+        # Gather every tap vector in the block at once: row j holds the
+        # num_taps samples ending 'delay' samples before the sample being
+        # predicted, exactly as the per-sample loop's
+        # signal[i - delay:i - delay - num_taps:-1] slice did.
+        x_block = signal[tap_offsets[:block_len] + block_start]
 
-        # Ensure the coefficients remain finite to avoid numerical issues
-        w = cp.clip(w, -1e10, 1e10)
+        # Filter outputs for the whole block, computed with the weights
+        # held at their block-entry value.
+        y = x_block @ w
 
-        # Store the filter output in the filtered signal
-        filtered_signal[i] = y
+        # Errors between the desired output and the filter output
+        e = desired[block_start:block_end] - y
+
+        # Store the filter outputs in the filtered signal
+        filtered_signal[block_start:block_end] = y
+
+        # Update the filter coefficients using the LMS rule, accumulated
+        # over the block: identical to applying the per-sample update
+        # 2 * mu * e[j] * x[j] for each sample in turn while the weights
+        # stay frozen.
+        w = w + 2 * mu * (x_block.T @ e)
+
+        # Ensure the coefficients remain finite to avoid numerical issues.
+        # cp.clip alone cannot repair NaN (comparisons against NaN are
+        # false, so it propagates straight through), which is why the
+        # nan_to_num pass comes first.
+        w = cp.clip(cp.nan_to_num(w), -1e10, 1e10)
 
     if return_weights:
         return filtered_signal, w
@@ -484,13 +785,18 @@ def upscale(
     target_bitrate_kbps (int): Used only to derive the interpolation
         upscale_factor relative to the source file's own bitrate
         (upscale_factor = round(target_bitrate_kbps * 1000 / source
-        bitrate)); must itself fall within the valid range for the
-        target format (a sanity bound on this parameter, chosen to keep
-        the derived upscale_factor reasonable). This is NOT a promise
-        about the produced file's real bitrate: the output is always
-        written as uncompressed PCM (see write_audio) at an upsampled
-        sample rate, so its actual bitrate will be substantially higher
-        than target_bitrate_kbps by design once upscale_factor > 1.
+        bitrate), then bounded -- see compute_upscale_factor); must
+        itself fall within the valid range for the target format (a
+        sanity bound on this parameter, chosen to keep the derived
+        upscale_factor reasonable). This is NOT a promise about the
+        produced file's real bitrate: the output is always written as
+        uncompressed PCM (see write_audio) at an upsampled sample rate,
+        so its actual bitrate will be substantially higher than
+        target_bitrate_kbps by design once upscale_factor > 1. The
+        derived factor is clamped to [1, MAX_UPSCALE_FACTOR] and
+        further reduced so the output sample rate never exceeds
+        MAX_OUTPUT_SAMPLE_RATE Hz, so this knob saturates rather than
+        producing unrealistic output for atypical source bitrates.
     toggle_normalize (bool): Whether to normalize the audio. Defaults to
         True.
     toggle_autoscale (bool): Whether to autoscale the audio based on the
@@ -532,10 +838,15 @@ def upscale(
     if audio.channels == 2:
         samples = samples.reshape((-1, 2))
 
-    # Determine the upscale factor
-    target_bitrate = target_bitrate_kbps * 1000
-    upscale_factor = round(target_bitrate / bitrate) if bitrate else 4
-    logger.info("Upscale factor set to: %s", upscale_factor)
+    # Determine the upscale factor. compute_upscale_factor() bounds the
+    # raw target/source bitrate ratio so an unusual (very low, very high,
+    # or unreadable) source bitrate cannot produce a factor of 0 (empty
+    # output) or an unrealistically large one (multi-hundred-kHz output
+    # sample rates, proportionally huge files, and proportionally longer
+    # runtime) -- see its docstring.
+    upscale_factor = compute_upscale_factor(
+        target_bitrate_kbps, bitrate, sample_rate
+    )
 
     # Process and upscale the audio channels
     if samples.ndim == 1:

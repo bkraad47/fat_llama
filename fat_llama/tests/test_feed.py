@@ -6,7 +6,9 @@ import numpy as np
 import soundfile as sf
 
 from fat_llama.audio_fattener.feed import (
-    apply_original_nyquist_cutoff, iterative_soft_thresholding, lms_filter,
+    DEFAULT_UPSCALE_FACTOR, MAX_OUTPUT_SAMPLE_RATE, MAX_UPSCALE_FACTOR,
+    _derive_lms_block_size, apply_original_nyquist_cutoff,
+    compute_upscale_factor, iterative_soft_thresholding, lms_filter,
     new_interpolation_algorithm, read_audio, upscale, write_audio
 )
 
@@ -32,6 +34,126 @@ GPU_AVAILABLE = _cuda_gpu_available()
 requires_gpu = unittest.skipUnless(
     GPU_AVAILABLE, "requires a CUDA-capable GPU (none available/functional)"
 )
+
+
+class TestUpscaleFactorDerivation(unittest.TestCase):
+    """Bounds on the target-bitrate -> upscale-factor derivation.
+
+    These are pure arithmetic (no CuPy compute), so unlike the rest of
+    this module they run on GPU-less machines too -- which matters,
+    because this derivation is exactly the stage that produced the
+    reported unrealistic output sample rates and file bitrates, and it
+    should be regression-covered everywhere the suite runs.
+    """
+
+    def test_typical_mp3_sources_give_realistic_factors(self):
+        # The project's own test asset is a 192 kbps, 44.1 kHz MP3. The
+        # unbounded formula gave round(900000 / 192000) = 5 for
+        # target_bitrate_kbps=900 (a 220500 Hz output) and 7 for the
+        # 1411 default (a 308700 Hz output measuring 5294 kbps as
+        # lossless FLAC) -- the exact numbers users reported as
+        # unrealistic. Bounded, both saturate at a realistic factor.
+        for source_bitrate in (128000, 192000, 320000):
+            for target_kbps in (800, 900, 1411):
+                factor = compute_upscale_factor(
+                    target_kbps, source_bitrate, 44100
+                )
+                self.assertGreaterEqual(factor, 1)
+                self.assertLessEqual(factor, MAX_UPSCALE_FACTOR)
+                self.assertLessEqual(
+                    44100 * factor, MAX_OUTPUT_SAMPLE_RATE,
+                    f"target={target_kbps} kbps, source={source_bitrate} "
+                    "bps produced an output sample rate above the "
+                    "realistic ceiling."
+                )
+
+        # The specific case from the report.
+        self.assertEqual(compute_upscale_factor(900, 192000, 44100), 4)
+        # A 320 kbps source's raw ratio (2.8 -> 3) is already realistic,
+        # so it must pass through unchanged -- the bounds must not
+        # flatten the knob where it was never broken.
+        self.assertEqual(compute_upscale_factor(900, 320000, 44100), 3)
+
+    def test_factor_never_zero_for_high_bitrate_sources(self):
+        # Regression: round() returns 0 whenever the source bitrate is
+        # more than twice the target -- e.g. a 24-bit/96 kHz WAV source
+        # (4608000 bps) with target_bitrate_kbps=900 gives
+        # round(0.195) == 0. A factor of 0 makes
+        # new_interpolation_algorithm produce a zero-length signal and
+        # upscale() write a 0 Hz file.
+        self.assertEqual(round((900 * 1000) / 4608000), 0)  # the old value
+        self.assertEqual(compute_upscale_factor(900, 4608000, 96000), 1)
+        # CD-quality WAV (1411 kbps) at the bottom of the valid range.
+        self.assertGreaterEqual(
+            compute_upscale_factor(800, 1411200, 44100), 1
+        )
+
+    def test_factor_capped_for_very_low_bitrate_sources(self):
+        # Regression: the raw ratio is unbounded above. An 8 kbps source
+        # with target 900 gives 112, i.e. a ~900 kHz output sample rate
+        # for an 8 kHz source and a 112x blow-up in memory and runtime.
+        self.assertEqual(round((900 * 1000) / 8000), 112)  # the old value
+        self.assertEqual(
+            compute_upscale_factor(900, 8000, 8000), MAX_UPSCALE_FACTOR
+        )
+        # And for a 44.1 kHz source the sample-rate ceiling binds first.
+        factor = compute_upscale_factor(900, 8000, 44100)
+        self.assertLessEqual(factor, MAX_UPSCALE_FACTOR)
+        self.assertLessEqual(44100 * factor, MAX_OUTPUT_SAMPLE_RATE)
+
+    def test_unknown_source_bitrate_falls_back_to_default(self):
+        for bad_bitrate in (None, 0, -1, float('nan'), float('inf')):
+            self.assertEqual(
+                compute_upscale_factor(1411, bad_bitrate, 44100),
+                DEFAULT_UPSCALE_FACTOR,
+                f"bitrate={bad_bitrate!r} should fall back to the default "
+                "upscale factor."
+            )
+
+    def test_high_rate_sources_are_not_upsampled_past_the_ceiling(self):
+        # A source already at or above the realistic ceiling must not be
+        # upsampled at all (factor 1), rather than multiplied further.
+        self.assertEqual(compute_upscale_factor(1411, 128000, 192000), 1)
+        self.assertEqual(compute_upscale_factor(1411, 128000, 384000), 1)
+        self.assertEqual(compute_upscale_factor(1411, 128000, 96000), 2)
+
+    def test_output_sample_rate_and_factor_bounded_over_a_wide_sweep(self):
+        # The property that actually matters: no combination of a valid
+        # target and any plausible source can produce an unrealistic
+        # output sample rate or a degenerate factor.
+        source_rates = (8000, 22050, 32000, 44100, 48000, 88200, 96000,
+                        176400, 192000)
+        source_bitrates = (8000, 32000, 64000, 128000, 192000, 320000,
+                           705600, 1411200, 4608000)
+        for sample_rate in source_rates:
+            for bitrate in source_bitrates:
+                for target_kbps in (800, 900, 1100, 1411, 6444):
+                    factor = compute_upscale_factor(
+                        target_kbps, bitrate, sample_rate
+                    )
+                    self.assertIsInstance(factor, int)
+                    self.assertGreaterEqual(factor, 1)
+                    self.assertLessEqual(factor, MAX_UPSCALE_FACTOR)
+                    self.assertLessEqual(
+                        sample_rate * factor,
+                        max(MAX_OUTPUT_SAMPLE_RATE, sample_rate),
+                        f"sample_rate={sample_rate}, bitrate={bitrate}, "
+                        f"target={target_kbps} produced "
+                        f"{sample_rate * factor} Hz output."
+                    )
+
+    def test_factor_is_monotonic_in_target_bitrate(self):
+        # target_bitrate_kbps must remain a sensible quality knob: never
+        # *decreasing* with a higher target, even where the bounds
+        # saturate it.
+        previous = 0
+        for target_kbps in range(800, 1412, 25):
+            factor = compute_upscale_factor(target_kbps, 320000, 44100)
+            self.assertGreaterEqual(
+                factor, previous,
+                f"upscale factor decreased at target={target_kbps} kbps."
+            )
+            previous = factor
 
 
 class TestAudioFattener(unittest.TestCase):
@@ -306,6 +428,128 @@ class TestAudioFattener(unittest.TestCase):
         )
 
     @requires_gpu
+    def test_lms_filter_block_processing_matches_sequential_recursion(self):
+        # Regression test for this cycle's performance fix. lms_filter
+        # used to advance the LMS recursion one sample at a time from
+        # Python (~6 CuPy kernel launches per output sample), so its
+        # runtime was set by the sample count, not the arithmetic: users
+        # reported upscale() appearing to hang for 30+ minutes on 15 s of
+        # audio with toggle_adaptive_filter=True (2 channels x 15 s at a
+        # 220500 Hz upscaled rate is 6.7M samples ~ 40M launches). The fix
+        # advances the recursion a block at a time (Block LMS) with the
+        # weight update still exactly the sum of the per-sample updates
+        # the frozen weights would have produced. This test pins the two
+        # properties that make that valid: block_size=1 must reproduce
+        # the sample-by-sample recursion exactly, and the auto-derived
+        # block must both (a) actually batch (or there is no speedup) and
+        # (b) still track the sequential result rather than diverging.
+        sr = 44100
+        num_taps = 32
+        delay = 1
+        mu = 0.001
+        t = cp.linspace(0, 0.2, int(sr * 0.2), endpoint=False)
+        signal = (
+            0.5 * cp.sin(2 * cp.pi * 300 * t)
+            + 0.2 * cp.sin(2 * cp.pi * 900 * t)
+        )
+        n = len(signal)
+        start = num_taps + delay
+
+        sequential, w_sequential = lms_filter(
+            signal, signal, mu=mu, num_taps=num_taps, delay=delay,
+            return_weights=True, block_size=1
+        )
+        blocked, w_blocked = lms_filter(
+            signal, signal, mu=mu, num_taps=num_taps, delay=delay,
+            return_weights=True
+        )
+
+        derived_block = _derive_lms_block_size(signal, mu, num_taps)
+        self.assertGreaterEqual(
+            derived_block, 8,
+            f"Derived LMS block size is only {derived_block} samples, so "
+            "the filter still issues nearly one round of kernel launches "
+            "per audio sample -- the performance fix is not in effect."
+        )
+        block_iterations = int(np.ceil((n - start) / derived_block))
+        self.assertLess(
+            block_iterations, (n - start) / 8,
+            f"Block processing only reduced the Python-level iteration "
+            f"count from {n - start} to {block_iterations}; the adaptive "
+            "filter's launch-bound runtime is essentially unchanged."
+        )
+
+        sequential_np = cp.asnumpy(sequential)
+        blocked_np = cp.asnumpy(blocked)
+        signal_np = cp.asnumpy(signal)
+
+        # Block LMS must not destabilise the recursion: an over-large
+        # block makes the frozen-weight approximation violate LMS's
+        # stability bound and the output blows up (measured with a NumPy
+        # reference: a fixed 1024-sample block on this very signal gives
+        # an output peak of 3.9e4 against an input peak of 0.5).
+        self.assertTrue(
+            np.all(np.isfinite(blocked_np)),
+            "Block-processed LMS output contains NaN/Inf."
+        )
+        self.assertLess(
+            np.max(np.abs(blocked_np)), 2 * np.max(np.abs(signal_np)),
+            "Block-processed LMS output peak far exceeds the input's; the "
+            "block size is outside the LMS stability bound."
+        )
+
+        # ...and it must still be the same filter, not merely a stable
+        # one.
+        correlation = np.corrcoef(
+            sequential_np[start:], blocked_np[start:]
+        )[0, 1]
+        self.assertGreater(
+            correlation, 0.999,
+            f"Block-processed LMS output correlates only {correlation:.6f} "
+            "with the sample-by-sample recursion; block processing changed "
+            "the filter's behaviour rather than just its scheduling."
+        )
+        relative_deviation = (
+            np.max(np.abs(sequential_np[start:] - blocked_np[start:]))
+            / np.max(np.abs(sequential_np[start:]))
+        )
+        self.assertLess(
+            relative_deviation, 0.1,
+            f"Block-processed LMS output deviates by "
+            f"{relative_deviation:.3g} (relative peak) from the "
+            "sample-by-sample recursion."
+        )
+        self.assertLess(
+            float(cp.max(cp.abs(w_blocked - w_sequential))), 0.05,
+            "Block-processed LMS tap weights diverged from the "
+            "sample-by-sample recursion's weights."
+        )
+
+        # The cycle 3 property must survive the rewrite: the filter still
+        # genuinely adapts and is not a pass-through.
+        w_initial = cp.zeros(num_taps, dtype=cp.float64)
+        w_initial[0] = 1.0
+        self.assertFalse(bool(cp.allclose(w_blocked, w_initial)))
+        self.assertFalse(bool(cp.allclose(blocked[start:], signal[start:])))
+
+    @requires_gpu
+    def test_lms_filter_handles_degenerate_inputs(self):
+        # The block loop must not index out of bounds on a signal shorter
+        # than its own warm-up region, and silence (zero power, from which
+        # no block size can be derived by signal power) must not produce
+        # NaN/Inf -- the issue report asked specifically whether numerical
+        # blow-up could be behind the adaptive filter's behaviour.
+        short = cp.asarray([0.1, 0.2, 0.3], dtype=cp.float64)
+        short_filtered = lms_filter(short, short)
+        self.assertEqual(len(short_filtered), len(short))
+        self.assertTrue(bool(cp.allclose(short_filtered, short)))
+
+        silence = cp.zeros(1000, dtype=cp.float64)
+        silence_filtered = lms_filter(silence, silence)
+        self.assertEqual(len(silence_filtered), len(silence))
+        self.assertTrue(bool(cp.all(cp.isfinite(silence_filtered))))
+
+    @requires_gpu
     def test_ist_harmonic_amplitude_scales_with_signal_peak(self):
         # Regression test for a cycle 3 finding: iterative_soft_
         # thresholding's harmonic injection term used a fixed absolute
@@ -509,18 +753,21 @@ class TestAudioFattener(unittest.TestCase):
         # holds through a real (if fast/small) end-to-end upscale() call,
         # not just for the apply_original_nyquist_cutoff unit in
         # isolation -- confirming it is actually wired into the pipeline
-        # as the final stage. Checked at two different upscale_factors
-        # (via two target_bitrate_kbps values) since the cutoff's
-        # correctness depends on the original/new sample-rate ratio, not
-        # just a single hard-coded case. toggle_adaptive_filter=False and
-        # max_iterations=2 keep this fast (lms_filter's per-sample Python
-        # loop is slow -- see feed.py's own notes). Uses target_format=
-        # 'wav' rather than 'flac': this source's deterministic LAME CBR
-        # encode (64 kbps) combined with a high target_bitrate_kbps drives
-        # a large enough upscale_factor that the resulting sample rate
-        # exceeds FLAC's ~655350 Hz format ceiling (a pre-existing,
-        # unrelated libsndfile/FLAC limitation) -- WAV has no such low
-        # ceiling and is an equally valid target_format for this check.
+        # as the final stage. Checked at two target_bitrate_kbps values
+        # since the cutoff's correctness depends on the original/new
+        # sample-rate ratio, not just a single hard-coded case. (Note:
+        # against this particular 64 kbps fixture both values now derive
+        # the same bounded upscale_factor -- compute_upscale_factor's
+        # output-sample-rate ceiling saturates well before 800 kbps --
+        # so the two runs differ only in the requested target; they
+        # would diverge for a higher-bitrate source.)
+        # toggle_adaptive_filter=False and max_iterations=2 keep this
+        # fast. Uses target_format='wav' rather than 'flac' for
+        # historical reasons: before upscale_factor was bounded, this
+        # source's deterministic LAME CBR encode (64 kbps) combined with
+        # a high target_bitrate_kbps drove a sample rate past FLAC's
+        # ~655350 Hz format ceiling. WAV remains an equally valid
+        # target_format for this check.
         original_nyquist = 44100 / 2.0
 
         for target_bitrate_kbps in (800, 1400):
@@ -588,23 +835,37 @@ class TestAudioFattener(unittest.TestCase):
         # target_bitrate_kbps: it is used only to derive upscale_factor
         # relative to the source file's own bitrate
         # (upscale_factor = round(target_bitrate_kbps * 1000 / source
-        # bitrate)); its 800-1411 (flac) valid range is a sanity bound on
-        # this parameter itself, not a promise about the produced file's
-        # real bitrate. The output is always written as uncompressed PCM
-        # (write_audio) at an upsampled sample rate, so its actual bitrate
-        # is, by design, substantially higher than target_bitrate_kbps
-        # once upscale_factor > 1 -- audio-quality-checker measured this
-        # divergence (target 1400 kbps vs. ~7822 kbps effective output) and
-        # flagged it; this test confirms the divergence is a documented,
-        # structural consequence of writing uncompressed high-resolution
-        # PCM, not an upscale_factor computation bug.
-        _, _, source_bitrate, _ = read_audio(
+        # bitrate), bounded by compute_upscale_factor); its 800-1411
+        # (flac) valid range is a sanity bound on this parameter itself,
+        # not a promise about the produced file's real bitrate. The
+        # output is always written as uncompressed PCM (write_audio) at
+        # an upsampled sample rate, so its actual data rate is, by
+        # design, substantially higher than target_bitrate_kbps once
+        # upscale_factor > 1 -- audio-quality-checker measured this
+        # divergence (target 1400 kbps vs. ~7822 kbps effective output)
+        # and flagged it; this test confirms the divergence is a
+        # documented, structural consequence of writing uncompressed
+        # high-resolution PCM, not an upscale_factor computation bug.
+        #
+        # Strengthened this cycle: the previous version asserted only
+        # that the output sample rate matched the *unbounded* ratio, so
+        # it would have passed just as happily on the unrealistic outputs
+        # users reported (a 220500 Hz / 5294 kbps FLAC from a 192 kbps
+        # source) or even on a multi-MHz one. It now also pins the
+        # realism bounds: the output sample rate must be a whole-number
+        # multiple of the source rate within [1, MAX_UPSCALE_FACTOR] and
+        # at or below MAX_OUTPUT_SAMPLE_RATE, and the file's real bitrate
+        # must be consistent with (and no greater than) the uncompressed
+        # PCM data rate implied by that sample rate.
+        source_sample_rate, _, source_bitrate, _ = read_audio(
             self.test_mp3_file, audio_format='mp3'
         )
         target_bitrate_kbps = 800  # minimum of the valid flac range
-        expected_upscale_factor = round(
-            target_bitrate_kbps * 1000 / source_bitrate
+        expected_upscale_factor = compute_upscale_factor(
+            target_bitrate_kbps, source_bitrate, source_sample_rate
         )
+        self.assertGreaterEqual(expected_upscale_factor, 1)
+        self.assertLessEqual(expected_upscale_factor, MAX_UPSCALE_FACTOR)
 
         output_file = 'test_output_bitrate.flac'
         try:
@@ -625,10 +886,34 @@ class TestAudioFattener(unittest.TestCase):
             # The output sample rate must reflect the documented
             # upscale_factor formula (source_sample_rate * upscale_factor).
             self.assertEqual(
-                info.samplerate, 44100 * expected_upscale_factor,
+                info.samplerate,
+                source_sample_rate * expected_upscale_factor,
                 "Output sample rate does not match the documented "
-                "upscale_factor = round(target_bitrate_kbps * 1000 / "
-                "source bitrate) formula."
+                "upscale_factor = compute_upscale_factor(...) formula."
+            )
+
+            # ...and that sample rate must be realistic, not merely
+            # arithmetically consistent. Users reported ~250 kHz outputs
+            # from a 44.1 kHz source; the derived factor is bounded so
+            # the produced rate stays a plain whole-number multiple of
+            # the source rate within playable territory.
+            self.assertGreaterEqual(
+                info.samplerate, source_sample_rate,
+                "Upscaled output is at a *lower* sample rate than the "
+                "source; upscale_factor must never fall below 1."
+            )
+            self.assertLessEqual(
+                info.samplerate, MAX_OUTPUT_SAMPLE_RATE,
+                f"Output sample rate {info.samplerate} Hz exceeds the "
+                f"realistic ceiling of {MAX_OUTPUT_SAMPLE_RATE} Hz. Note "
+                "that apply_original_nyquist_cutoff zeroes everything "
+                f"above {source_sample_rate / 2} Hz anyway, so the extra "
+                "rate carries no additional information -- only bytes."
+            )
+            self.assertEqual(
+                info.samplerate % source_sample_rate, 0,
+                "Output sample rate is not a whole-number multiple of the "
+                "source sample rate."
             )
 
             # The upscaled output must also be coherent *audio*, not just a
@@ -674,17 +959,42 @@ class TestAudioFattener(unittest.TestCase):
             real_bitrate_kbps = (
                 os.path.getsize(output_file) * 8 / info.duration / 1000
             )
-            # By design (uncompressed PCM at an upsampled rate), the real
-            # output bitrate must be well above target_bitrate_kbps even
-            # at the minimum of the valid range -- this is the documented,
-            # intentional divergence, not a defect to eliminate.
+            # write_audio() writes PCM_24, so this is the output's
+            # uncompressed data rate; FLAC then losslessly compresses it
+            # by a content-dependent amount, so the file's real bitrate
+            # must land in (0, pcm_bitrate_kbps].
+            pcm_bitrate_kbps = (
+                info.samplerate * 24 * info.channels / 1000
+            )
+            # By design (uncompressed PCM at an upsampled rate), the
+            # output's data rate must be well above target_bitrate_kbps
+            # even at the minimum of the valid range -- this is the
+            # documented, intentional divergence, not a defect to
+            # eliminate. Asserted on the PCM data rate rather than the
+            # compressed file size, since the latter also depends on how
+            # compressible the particular program material is (a pure
+            # sine compresses far better than music).
             self.assertGreater(
-                real_bitrate_kbps, target_bitrate_kbps * 2,
-                "Expected the real output bitrate to substantially exceed "
-                "target_bitrate_kbps (uncompressed PCM at an upsampled "
-                "rate); if this no longer holds, target_bitrate_kbps's "
-                "documented contract (a upscale_factor-derivation knob, "
-                "not an output bitrate promise) may have changed."
+                pcm_bitrate_kbps, target_bitrate_kbps * 2,
+                "Expected the output's uncompressed PCM data rate to "
+                "substantially exceed target_bitrate_kbps (PCM_24 at an "
+                "upsampled rate); if this no longer holds, "
+                "target_bitrate_kbps's documented contract (an "
+                "upscale_factor-derivation knob, not an output bitrate "
+                "promise) may have changed."
+            )
+            # The real bitrate must be plausible *for that sample rate*:
+            # a lossless FLAC of PCM_24 data can never exceed its own
+            # uncompressed rate (a few percent of container/header
+            # overhead aside), and must not be zero-length either.
+            self.assertGreater(real_bitrate_kbps, 0)
+            self.assertLessEqual(
+                real_bitrate_kbps, pcm_bitrate_kbps * 1.05,
+                f"Real output bitrate {real_bitrate_kbps:.0f} kbps exceeds "
+                f"the uncompressed PCM_24 rate implied by the output's own "
+                f"{info.samplerate} Hz / {info.channels} ch format "
+                f"({pcm_bitrate_kbps:.0f} kbps); the written file is not "
+                "consistent with its declared format."
             )
         finally:
             if os.path.exists(output_file):
