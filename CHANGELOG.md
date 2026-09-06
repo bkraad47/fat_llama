@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.4.1] - 2026-09-06
+## [1.4.2] - 2026-09-06
 
 Produced by an `iterate-fat-llama` run resolving [GitHub issue #20](https://github.com/bkraad47/fat_llama/issues/20) (branch `iterate-fat-llama/20260906-044742`, off `Issue-no-20-unrealistic-final-bitrate-fixing`). Four fix cycles were kept; a fifth confirmed the result on real GPU hardware and made no further changes, having already met this process's bar for a satisfactory result.
 
