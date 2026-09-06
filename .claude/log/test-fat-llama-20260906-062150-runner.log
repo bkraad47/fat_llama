@@ -1,0 +1,15 @@
+### [06:21:50 UTC] Step 1 — dispatch code-tester-reviewer
+Input: cycle 4 of iterate-fat-llama run for issue #20; candidate C_3, branch iterate-fat-llama/20260906-044742 @ 5a8f300315a20b0dcf8b5c29e76409342fea0d82.
+Action: dispatched code-tester-reviewer, in parallel with audio-quality-checker below.
+Output: 4 non-GPU tests, all pass. quality: [].
+
+### [06:21:50 UTC] Step 2 — dispatch audio-quality-checker
+Input: same candidate/branch/commit; no proposed_upscale_params (baseline config).
+Action: dispatched audio-quality-checker, asked to specifically confirm on real hardware whether cycle 3's harmonic-frequency fix improved scores as predicted.
+Output: used remote-GPU path (job a346782fb0b24bfcb5ffbcf5ed439039), pushed 5a8f300 to origin, entire job ~2m50s (adaptive filter on) -- issue #20's runtime symptom reconfirmed fixed again; sample rate 176400 Hz, bitrate ~1875 kbps also reconfirmed. Cycle 3's fix verdict: CONFIRMED but only partially effective -- the subsonic 0.066 Hz artifact is genuinely gone (output's sub-20Hz content now matches the reference within 0.4 dB), and spectral_deviation rose 9.0->9.3 as predicted in direction. BUT: because upscale() passes each channel as ONE ~15s whole-file buffer, the "dominant retained FFT bin" computed each IST iteration is the SAME bin every time (a whole-file FFT has one global dominant peak) -- so the harmonic term, while now correctly audible-band instead of subsonic, is still a STATIC single-frequency drone (98.168 Hz, exactly 2x the whole-buffer's dominant bin) spanning the entire track at a fixed -28.7 dBFS, collapsing dynamic range from 57.1 dB (reference) to 25.4 dB (output) -- especially audible/damaging in quiet passages. 11 audio_quality tests: 9 pass, 2 fail (test_no_constant_non_source_injected_tone, test_dynamic_range_preserved_in_quiet_passages -- both the same root cause). coherence DROPPED to 7.0 (from 8.0 last cycle) despite spectral_deviation rising to 9.3 -- the new artifact is worse for a listener than the old one even though it scores better on the convergence/correlation metric. Suggested direction (not implemented, generate-code's call): derive the dominant bin per short analysis frame (STFT/overlap-add) instead of once per whole buffer, and/or gate the injected amplitude to the local signal envelope; also worth reconsidering whether the harmonic term should exist at all given marginal added-detail evidence. No test-assertion edits made this cycle. quality (PEP8) = [].
+
+### [06:26:xx UTC] Step 3-4 — merge and update README
+Action: merged tests (4 code + 11 audio_quality = 15 entries) and quality ([]). Updated README.md's Audio Quality Scores block. Spectrogram image line unchanged.
+Output: README.md updated.
+
+### [06:26:xx UTC] DONE — merged JSON assembled: 15 tests (4 code pass, 11 audio_quality: 9 pass/2 fail), 0 quality findings, coherence 7.0 (down from 8.0), spectral_deviation 9.3 (up from 9.0). Issue #20's DIRECTIVES-literal symptoms remain fixed. Cycle 3's harmonic-frequency fix is a genuine but incomplete/regressive fix: traded a subsonic artifact for an audible static-drone artifact with worse dynamic-range impact.

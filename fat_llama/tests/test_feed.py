@@ -559,134 +559,74 @@ class TestAudioFattener(unittest.TestCase):
         )
 
     @requires_gpu
-    def test_ist_harmonic_amplitude_scales_with_signal_peak(self):
-        # Regression test for a cycle 3 finding: iterative_soft_
-        # thresholding's harmonic injection term used a fixed absolute
-        # total amplitude (0.1, spread across max_iter iterations) instead
-        # of one scaled to the input's own peak amplitude. upscale() never
-        # normalizes before calling this function -- `data` is raw-PCM-
-        # scale (peak ~1e4-3e4 for 16-bit-sourced audio) -- so a fixed
-        # absolute total of 0.1 was an ~1e-5 relative contribution: far too
-        # small to survive the pipeline's later autoscale/normalize steps
-        # (which only apply a global scalar gain and cannot change that
-        # ratio) as measurable added detail. This test isolates the
-        # harmonic term's relative contribution using a threshold small
-        # enough that essentially nothing gets masked in either the time
-        # or frequency domain (so the FFT/IFFT round trip is
-        # near-identity and the harmonic term is the dominant source of
-        # change), and checks that the relative (not absolute) added
-        # contribution is consistent across a large change in the input's
-        # absolute scale.
-        n = 2000
-        t = cp.linspace(0, 1, n, endpoint=False)
-        base_shape = (
-            cp.sin(2 * cp.pi * 300 * t) + 0.3 * cp.sin(2 * cp.pi * 700 * t)
-        )
-        small_scale_signal = base_shape * 1.0
-        large_scale_signal = base_shape * 10000.0
-        negligible_threshold = 1e-9
-        max_iter = 10
-
-        out_small = iterative_soft_thresholding(
-            small_scale_signal.copy(), max_iter, negligible_threshold
-        )
-        out_large = iterative_soft_thresholding(
-            large_scale_signal.copy(), max_iter, negligible_threshold
-        )
-
-        added_small = float(
-            cp.max(cp.abs(out_small - small_scale_signal))
-        )
-        added_large = float(
-            cp.max(cp.abs(out_large - large_scale_signal))
-        )
-        relative_added_small = added_small / float(
-            cp.max(cp.abs(small_scale_signal))
-        )
-        relative_added_large = added_large / float(
-            cp.max(cp.abs(large_scale_signal))
-        )
-
-        self.assertGreater(
-            relative_added_large, relative_added_small * 0.5,
-            "iterative_soft_thresholding's harmonic contribution collapses "
-            "relative to the signal's own peak as absolute scale grows "
-            f"(relative added: {relative_added_small:.3g} at peak=1 vs "
-            f"{relative_added_large:.3g} at peak=10000); the harmonic "
-            "amplitude is likely a fixed absolute constant rather than "
-            "one scaled to the input's own amplitude, making it "
-            "unmeasurable at real (raw PCM-scale) audio amplitudes."
-        )
-
-    @requires_gpu
-    def test_ist_harmonic_term_lands_in_audible_band(self):
-        # Regression test for a finding this cycle (audio-quality-checker,
-        # test_ist_harmonic_term_contributes_audible_detail): the harmonic
-        # reconstruction term used to be cp.sin(cp.linspace(0, 2*pi,
-        # len(data_thres))) -- exactly ONE cycle across the WHOLE buffer,
-        # regardless of buffer length or content. For a real ~15s
-        # upscaled buffer that lands at a ~0.066 Hz subsonic oscillation
-        # (measured: a non-source 0.066 Hz sine at -26.2 dBFS, costing
-        # 2.6% of peak headroom for content nobody can hear), not audible
-        # added detail. The fix reuses each iteration's own FFT (already
-        # computed for the masking step) to find the dominant retained
-        # frequency component and injects its first overtone (2x its bin
-        # index) instead -- content genuinely derived from what the
-        # signal already contains, landing wherever that content's own
-        # frequency is (doubled), not at a fixed subsonic rate.
+    def test_ist_no_static_floor_in_quiet_segment(self):
+        # Regression test for a cycle 4 finding: cycle 3's harmonic-
+        # reconstruction term derived its frequency from cp.argmax of the
+        # ENTIRE buffer's masked FFT every iteration. A whole-buffer FFT
+        # has one global dominant bin, so for any real multi-thousand-
+        # sample upscaled channel that "content-derived" frequency was
+        # actually static across all iterations and the whole track -- a
+        # constant, non-source tone (measured by audio-quality-checker: a
+        # 98.168 Hz component at -28.7 dBFS spanning the entire output),
+        # not time-varying detail. Its amplitude was also derived once
+        # from the buffer's global peak and applied uniformly regardless
+        # of local signal level, so it acted as a hard floor that
+        # collapsed measured dynamic range in quiet passages from 57.1 dB
+        # (reference) to 25.4 dB (output). This cycle removed the
+        # harmonic term entirely (see iterative_soft_thresholding's own
+        # docstring) rather than attempting a fourth revision of it.
         #
-        # This test isolates the harmonic term the same way
-        # test_ist_harmonic_amplitude_scales_with_signal_peak does (a
-        # negligible threshold, so the FFT/IFFT round trip is near-
-        # identity and the harmonic term is the dominant source of
-        # change), then checks the *frequency* of the added content
-        # instead of its amplitude: it must track the input's own
-        # dominant frequency (here treating the 1-second synthetic
-        # buffer's bin spacing as Hz), not sit at a fixed ~1 Hz
-        # regardless of input.
-        n = 2000
-        t = cp.linspace(0, 1, n, endpoint=False)
-        negligible_threshold = 1e-9
-        max_iter = 10
+        # The test this replaces (test_ist_harmonic_term_lands_in_
+        # audible_band) only ever exercised a short, single-segment
+        # n=2000 buffer, where a single dominant bin is genuinely
+        # representative of the whole signal -- it could never have
+        # caught this failure mode. This test instead builds a two-
+        # segment, longer buffer (a loud segment followed by a much
+        # quieter one, both at real-PCM-like amplitude scale) and
+        # exercises iterative_soft_thresholding's output the same way
+        # upscale_channels actually uses it (added back onto the original
+        # signal, not used standalone), then checks that the quiet
+        # segment's level does not rise far above its pre-IST level --
+        # i.e. that IST does not inject a static, content-independent
+        # floor.
+        sr = 44100
+        t_loud = cp.arange(sr, dtype=cp.float64) / sr  # 1s
+        t_quiet = cp.arange(sr, dtype=cp.float64) / sr  # 1s
+        loud_segment = 20000.0 * cp.sin(2 * cp.pi * 400 * t_loud)
+        quiet_segment = 5.0 * cp.sin(2 * cp.pi * 400 * t_quiet)
+        data = cp.concatenate([loud_segment, quiet_segment])
+        n_loud = len(loud_segment)
 
-        def dominant_added_frequency(signal):
-            out = iterative_soft_thresholding(
-                signal.copy(), max_iter, negligible_threshold
-            )
-            added = cp.asnumpy(out - signal)
-            spectrum = np.abs(np.fft.rfft(added))
-            freqs = np.fft.rfftfreq(n, d=1.0 / n)
-            spectrum[0] = 0  # ignore DC
-            return float(freqs[np.argmax(spectrum)])
+        max_iter = 20
+        threshold = 0.6
 
-        signal_300 = (
-            0.8 * cp.sin(2 * cp.pi * 300 * t)
-            + 0.3 * cp.sin(2 * cp.pi * 700 * t)
+        ist_changes = iterative_soft_thresholding(
+            data.copy(), max_iter, threshold
         )
-        signal_100 = (
-            0.8 * cp.sin(2 * cp.pi * 100 * t)
-            + 0.3 * cp.sin(2 * cp.pi * 900 * t)
-        )
+        # Matches upscale_channels' actual usage: the interpolated signal
+        # plus IST's returned value, not IST's output taken standalone.
+        combined = data + ist_changes
 
-        freq_300 = dominant_added_frequency(signal_300)
-        freq_100 = dominant_added_frequency(signal_100)
+        quiet_rms_before = float(cp.sqrt(cp.mean(quiet_segment ** 2)))
+        quiet_rms_after = float(cp.sqrt(cp.mean(combined[n_loud:] ** 2)))
 
-        # Must not be the old bug's fixed ~1 Hz subsonic injection,
-        # regardless of what the input's dominant frequency is.
-        self.assertGreater(
-            freq_300, 20.0,
-            "iterative_soft_thresholding's harmonic term landed at "
-            f"{freq_300:.3g} Hz-equivalent for a 300 Hz-dominated input -- "
-            "at or near the old bug's fixed ~1 Hz subsonic injection "
-            "(one cycle across the whole buffer) rather than audible, "
-            "content-derived detail."
+        # A generous bound: allow up to a ~4x (12 dB) rise, which covers
+        # this function's own separately-documented, pre-existing
+        # near-lossless-round-trip "doubling" effect (threshold barely
+        # masks anything at real PCM scale, so IST's output is close to a
+        # second copy of the input added back on top) without allowing a
+        # large, content-independent static floor like the one this test
+        # guards against (measured, cycle 3 regression: >50 dB rise in an
+        # equivalent synthetic case).
+        self.assertLess(
+            quiet_rms_after, quiet_rms_before * 4.0,
+            "iterative_soft_thresholding (as combined by upscale_channels) "
+            f"raised the quiet segment's RMS from {quiet_rms_before:.4g} "
+            f"to {quiet_rms_after:.4g} -- a "
+            f"{20 * math.log10(quiet_rms_after / quiet_rms_before):.1f} dB "
+            "rise -- consistent with a static, content-independent tone/"
+            "floor being injected rather than genuine local detail."
         )
-        # Must track the input's own dominant frequency (here, its first
-        # overtone/octave) rather than sit at one fixed frequency
-        # regardless of content.
-        self.assertAlmostEqual(freq_300, 600.0, delta=5.0)
-        self.assertAlmostEqual(freq_100, 200.0, delta=5.0)
-        self.assertNotAlmostEqual(freq_300, freq_100, delta=50.0)
 
     @requires_gpu
     def test_new_interpolation_algorithm_is_bandlimited(self):
