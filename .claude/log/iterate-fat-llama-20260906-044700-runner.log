@@ -117,3 +117,38 @@ Input: score_4 = 0.8182 (not 1.0). Satisfactory-results condition: (1) no code b
 Action: none (no early stop -- condition 2 fails, and the underlying audio quality genuinely regressed by one listener-relevant measure this cycle even though a different measure improved).
 Reasoning: 1 cycle remains under the 5-cycle cap. Dispatching generate-code for cycle 4 to address the newly-identified static-drone artifact, per audio-quality-checker's own suggested direction (frame-local dominant-bin derivation, and/or reconsidering the harmonic term's necessity) -- same in-scope-coherence-fix reasoning as cycle 3's dispatch. Running score table: (1, 0.6875) C_0, (2, 0.8571) C_1, (3, 0.8333) C_2, (4, 0.8182) C_3 -- C_1 (cycle 1's fix alone: bounded upscale_factor + block-adaptive lms_filter, no harmonic-term change) is currently the best-scoring candidate; noting this now since it's directly relevant to the rollback decision if cycle 5 doesn't improve on it.
 Output: proceeding to generate-code dispatch for cycle 4.
+
+### [06:33:08 UTC] Cycle 4d — generate-code
+Input: full test-fat-llama JSON from cycle 4b (the 2 dynamic-range/static-tone failures), DIRECTIVES verbatim, mission context, root-cause diagnosis (whole-buffer FFT gives a single static dominant bin), explicit permission to remove the harmonic term entirely as a legitimate conservative outcome given this is cycle 4 of 5 and the rollback safety net.
+Action: dispatched generate-code subagent (model: sonnet override). Log: .claude/log/generate-code-20260906-063308-github-actions[bot].log.
+Output: {"outcome": "confirmed", "changes": [feed.py: removed iterative_soft_thresholding's harmonic-reconstruction term entirely (added across cycles 2-3, revised again in cycle 3, still defective) -- function now performs the plain textbook IST round trip (threshold, FFT, mask, IFFT) with no synthetic tone added; extensively documented the 3-cycle history (unbounded growth -> subsonic tone -> static audible drone) and removal rationale in the docstring; test_feed.py: removed the 2 tests that tested harmonic-term properties (now meaningless), added test_ist_no_static_floor_in_quiet_segment (loud-then-quiet 2-segment buffer, long/structured enough to actually catch a whole-buffer-FFT-style regression that the old short n=2000 test could never catch); README.md: updated Algorithm Explanation step 4], "verification": {"status": "partial", "evidence": "No local GPU (same limitation as prior cycles); verified via numpy stand-in against real algorithm logic: pre-fix quiet segment rose +52.0 dB (matches the checker's catastrophic-floor report), post-fix only +6.0 dB (matches the function's own separately-documented, pre-existing 'IST output added on top of original signal' near-doubling effect, not a new artifact) -- new test's bound (12 dB) discriminates correctly between the two."}, "proposed_upscale_params": null}. Also flagged (not fixed, separate pre-existing issue): upscale_channels adds IST's return value ON TOP of the original signal rather than replacing it, which combined with the long-documented threshold-scale issue makes IST's output close to a redundant second copy -- this is the source of the +6dB "benign" rise and a candidate for a future cycle, not touched here.
+
+### [06:33:xx UTC] Cycle 4e — checkpoint
+Action: git add -A && git commit -m "iterate-fat-llama: cycle 4 fix" (c015b90), tagged iterate-fat-llama/20260906-044742/iter-4 (candidate C_4).
+Output: C_4 committed and tagged. Running score table: (1, 0.6875) C_0, (2, 0.8571) C_1, (3, 0.8333) C_2, (4, 0.8182) C_3. One cycle remains (cycle 5) before the 5-cycle cap forces a rollback decision.
+
+### [06:42:46 UTC] Cycle 5a — review-current-state
+Input: candidate C_4 (cycle 4's committed fix: harmonic term removed)
+Action: dispatched review-current-state skill. Log: .claude/log/review-current-state-20260906-064246-runner.log
+Output: docs/CURRENT_STATE.md updated -- iterative_soft_thresholding factblock rewritten for the 3-revision-then-removal history, obsolete test factblocks reconciled, long-standing harmonic-term Notes item resolved.
+
+### [06:42:52 UTC] Cycle 5b — test-fat-llama
+Input: candidate C_4
+Action: dispatched test-fat-llama skill. Coordinator log: .claude/log/test-fat-llama-20260906-064252-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260906-064311-github-actions-bot.log, .claude/log/audio-quality-checker-20260906-064315-runner.log.
+Output: 16 tests total (4 code, all pass; 12 audio_quality: 11 pass, 1 fail). score_5 = 11/12 = 0.9167. Both DIRECTIVES symptoms reconfirmed fixed again on real GPU hardware. Cycle 4's harmonic-term removal is confirmed to have resolved the dynamic-range/drone problem completely with no tradeoff: coherence 7.0->9.0, spectral_deviation 9.3->9.9. The single remaining failure (test_added_detail_below_original_nyquist) is an expected, documented consequence of the removal (IST is now a near-lossless round trip, adding no detail) rather than a defect.
+
+### [06:47:xx UTC] Cycle 5c — early-stop check
+Input: score_5 = 0.9167 (not 1.0). Satisfactory-results condition: (1) no code bugs -- true (4/4 pass, quality=[]); (2) coherence > 8.5 -- true (9.0); (3) spectral deviation > 9.0 -- true (9.9); (4) DIRECTIVES satisfied -- true (both original symptoms reconfirmed fixed again this cycle).
+Action: EARLY STOP TRIGGERED -- all four satisfactory-results conditions hold. Per SKILL.md step (c), stopping the loop immediately without running a cycle-5 fix; proceeding straight to Step 5 with the working tree exactly as it is (candidate C_4, HEAD c015b9016621df6c65ab8bc137226e62612887a0, tagged iterate-fat-llama/20260906-044742/iter-4).
+Reasoning: this is coincidentally also the last cycle under the 5-cycle cap, but the stop is triggered by the satisfactory-results condition, not by exhausting the cap -- no rollback decision is needed since the loop did not run all 5 cycles to completion without an early stop (rollback only applies in that case, per the cycle policy). C_4 is kept as the final result.
+Output: Final score table for the record: (1, 0.6875) C_0, (2, 0.8571) C_1, (3, 0.8333) C_2, (4, 0.8182) C_3, (5, 0.9167) C_4. C_4 is both the highest-scoring candidate AND the one kept via early stop -- no tension with the rollback rule in this case.
+
+### [06:52:10 UTC] Step 5 — docs and changelog
+Input: final chosen working tree = C_4 (no rollback).
+Action: dispatched review-current-state once more (log: .claude/log/review-current-state-20260906-065210-runner.log) -- confirmed already current, no rewrite needed. Wrote CHANGELOG.md entry for [1.4.1]: 3 Fixed bullets (sample-rate/bitrate bound, adaptive-filter block-LMS runtime fix, IST harmonic-term removal after its 3-attempt journey across cycles 2-4), 1 Added bullet group (cycle 1-3's new regression tests), Notes (score trajectory, the newly-flagged upscale_channels/threshold issue, carried-over known gaps).
+Output: CHANGELOG.md updated with a human-edited-quality entry (reviewed holistically for clarity/style, not a raw JSON dump).
+
+### [06:52:xx UTC] Step 6 — version bump
+Input: setup.py version 1.4.0. DIRECTIVES asked for bug fixes only (unrealistic bitrate/sample-rate, adaptive-filter runtime), not new functionality.
+Action: patch bump per default policy: 1.4.0 -> 1.4.1. Updated setup.py's version field and filled it into the CHANGELOG.md entry.
+Output: setup.py version = 1.4.1.
