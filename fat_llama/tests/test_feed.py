@@ -1,10 +1,14 @@
+import inspect
+import math
 import os
 import unittest
+from unittest import mock
 
 import cupy as cp
 import numpy as np
 import soundfile as sf
 
+from fat_llama.audio_fattener import feed as feed_module
 from fat_llama.audio_fattener.feed import (
     MAX_REALISTIC_SAMPLE_RATE_HZ, _lms_block_ranges,
     apply_original_nyquist_cutoff, compute_upscale_factor,
@@ -238,9 +242,24 @@ class TestAudioFattener(unittest.TestCase):
         ):
             ranges = list(_lms_block_ranges(start, n, block_size))
             covered = []
-            for block_start, block_end in ranges:
+            for index, (block_start, block_end) in enumerate(ranges):
                 self.assertLess(block_start, block_end)
                 self.assertLessEqual(block_end - block_start, block_size)
+                # Every block except the last must be exactly block_size
+                # long -- the whole point of the issue #20 runtime fix is
+                # that the number of sequential (kernel-launching) Python
+                # iterations drops to ~n / block_size. A partition that
+                # emitted short blocks would silently give back that
+                # speedup while still passing the coverage check below.
+                if index < len(ranges) - 1:
+                    self.assertEqual(
+                        block_end - block_start, block_size,
+                        f"_lms_block_ranges(start={start}, n={n}, "
+                        f"block_size={block_size}) emitted a short "
+                        f"non-final block [{block_start}, {block_end}); "
+                        "only the final block may be shorter than "
+                        "block_size."
+                    )
                 covered.extend(range(block_start, block_end))
             self.assertEqual(
                 covered, list(range(start, n)),
@@ -391,6 +410,152 @@ class TestAudioFattener(unittest.TestCase):
             "dropout: filtered RMS immediately after warm-up "
             f"({early_filtered_rms:.4f}) is far below the input's own "
             f"RMS in that window ({early_signal_rms:.4f})."
+        )
+
+    @requires_gpu
+    def test_lms_filter_block_size_one_matches_reference_per_sample_update(
+        self
+    ):
+        # Regression test for a coverage gap flagged by audio-quality-
+        # checker: lms_filter's own docstring claims "block_size=1
+        # reproduces the exact prior per-sample update" (verified there
+        # only algebraically, in prose), but no test asserted it -- a
+        # future change to the block-averaged gradient formula (e.g. an
+        # off-by-one in block_len, or applying the block mean even when
+        # block_len == 1) could silently break the claimed equivalence
+        # while every other test (which only exercises the default
+        # block_size=256) kept passing. This builds an independent
+        # reference implementation of the exact per-sample LMS update
+        # described in lms_filter's own comments (same w initialization,
+        # same delay convention, same "2 * mu * e * x" update term, no
+        # block averaging -- just a plain per-sample Python loop) and
+        # checks it against lms_filter(..., block_size=1).
+        sr = 44100
+        num_taps = 16
+        mu = 0.001
+        delay = 1
+        t = cp.linspace(0, 0.05, int(sr * 0.05), endpoint=False)
+        signal = (
+            0.5 * cp.sin(2 * cp.pi * 300 * t)
+            + 0.2 * cp.sin(2 * cp.pi * 900 * t)
+        )
+
+        def reference_per_sample_lms(sig, desired):
+            n = len(sig)
+            w = cp.zeros(num_taps, dtype=cp.float64)
+            w[0] = 1.0
+            filtered = cp.zeros(n, dtype=cp.float64)
+            start = num_taps + delay
+            filtered[:start] = sig[:start]
+            for i in range(start, n):
+                y = cp.float64(0.0)
+                for k in range(num_taps):
+                    y = y + w[k] * sig[i - delay - k]
+                e = desired[i] - y
+                for k in range(num_taps):
+                    w[k] = w[k] + 2 * mu * e * sig[i - delay - k]
+                w = cp.clip(w, -1e10, 1e10)
+                filtered[i] = y
+            return filtered, w
+
+        ref_filtered, ref_w = reference_per_sample_lms(signal, signal)
+        block_filtered, block_w = lms_filter(
+            signal, signal, mu=mu, num_taps=num_taps, delay=delay,
+            block_size=1, return_weights=True
+        )
+
+        self.assertTrue(
+            bool(cp.allclose(block_filtered, ref_filtered, atol=1e-9)),
+            "lms_filter(block_size=1) output does not match an "
+            "independent per-sample LMS reference implementation of the "
+            "same update rule; the docstring's claim that block_size=1 "
+            "reproduces the exact prior per-sample update no longer "
+            "holds."
+        )
+        self.assertTrue(
+            bool(cp.allclose(block_w, ref_w, atol=1e-9)),
+            "lms_filter(block_size=1) final tap weights do not match an "
+            "independent per-sample LMS reference implementation; the "
+            "block_size=1 equivalence claim does not hold for the "
+            "weight-update path."
+        )
+
+    @requires_gpu
+    def test_lms_filter_block_size_bounds_sequential_iterations(self):
+        # Regression test for a coverage gap flagged by audio-quality-
+        # checker: lms_filter's docstring claims the block-adaptive
+        # rewrite (issue #20) "cuts the number of sequential Python-loop
+        # iterations ... from n to roughly n / block_size" with a default
+        # block_size of 256, but nothing asserted either the default or
+        # the iteration count itself. A regression that silently made
+        # every block length 1 sample (e.g. lms_filter no longer passing
+        # its block_size argument through to _lms_block_ranges, or the
+        # default being changed) would pass every other test in this
+        # module (which only check output values, not how many
+        # sequential iterations produced them) while quietly
+        # reintroducing the exact per-sample-loop runtime issue that
+        # issue #20 reported (27.5 minutes for a 15.2s source).
+        default_block_size = inspect.signature(lms_filter).parameters[
+            'block_size'
+        ].default
+        self.assertEqual(
+            default_block_size, 256,
+            "lms_filter's default block_size changed from the "
+            "documented 256; this silently changes the default runtime/"
+            "accuracy tradeoff described in its docstring."
+        )
+
+        sr = 44100
+        num_taps = 16
+        t = cp.linspace(0, 0.2, int(sr * 0.2), endpoint=False)
+        signal = (
+            0.5 * cp.sin(2 * cp.pi * 300 * t)
+            + 0.2 * cp.sin(2 * cp.pi * 900 * t)
+        )
+        n = len(signal)
+        start = num_taps + 1  # delay defaults to 1
+
+        call_counts = []
+
+        def counting_block_ranges(block_start, block_n, block_size):
+            ranges = list(
+                _lms_block_ranges(block_start, block_n, block_size)
+            )
+            call_counts.append(len(ranges))
+            return iter(ranges)
+
+        with mock.patch.object(
+            feed_module, '_lms_block_ranges',
+            side_effect=counting_block_ranges
+        ):
+            lms_filter(signal, signal, num_taps=num_taps, block_size=256)
+            lms_filter(signal, signal, num_taps=num_taps, block_size=1)
+
+        iterations_default, iterations_per_sample = call_counts
+        expected_default_iterations = math.ceil((n - start) / 256)
+
+        self.assertEqual(
+            iterations_default, expected_default_iterations,
+            "lms_filter's default block_size=256 run did not perform "
+            "the expected number of sequential block iterations "
+            f"(expected {expected_default_iterations}, got "
+            f"{iterations_default})."
+        )
+        self.assertEqual(
+            iterations_per_sample, n - start,
+            "lms_filter(block_size=1) did not perform exactly one "
+            f"sequential iteration per sample (expected {n - start}, "
+            f"got {iterations_per_sample}); this is exactly the "
+            "per-sample-loop behavior issue #20's block-adaptive "
+            "rewrite was meant to replace."
+        )
+        self.assertLess(
+            iterations_default, iterations_per_sample / 100,
+            "lms_filter's default block_size=256 only cut sequential "
+            f"iterations from {iterations_per_sample} to "
+            f"{iterations_default}, far short of the roughly "
+            "two-orders-of-magnitude reduction issue #20's fix "
+            "documents; this would erode the fix's runtime improvement."
         )
 
     @requires_gpu
@@ -665,6 +830,74 @@ class TestAudioFattener(unittest.TestCase):
             finally:
                 if os.path.exists(output_file):
                     os.remove(output_file)
+
+    @requires_gpu
+    def test_upscale_end_to_end_with_adaptive_filter_enabled(self):
+        # Regression test for a coverage gap flagged by audio-quality-
+        # checker after issue #20's block-adaptive lms_filter rewrite:
+        # every existing end-to-end upscale() test passes
+        # toggle_adaptive_filter=False to stay fast, so the exact stage
+        # issue #20 rewrote (previously impractical to enable at all --
+        # 27.5 minutes for the adaptive-filter stage alone on a 15.2s
+        # source) had zero pipeline-level coverage; only isolated
+        # lms_filter unit tests (built directly against synthetic
+        # arrays, never routed through the real upscale() pipeline)
+        # exercised it. This runs a real upscale() call with
+        # toggle_adaptive_filter=True and a small max_iterations to stay
+        # fast, and checks the same coherence properties the other e2e
+        # tests check, specifically on the adaptive-filtered output, so
+        # a wiring regression in upscale()'s lms_filter call (wrong
+        # axis, shape mismatch, numerical instability at real pipeline
+        # scale) would be caught even though it wouldn't show up in any
+        # isolated lms_filter unit test.
+        output_file = 'test_output_adaptive_filter.flac'
+        try:
+            upscale(
+                input_file_path=self.test_mp3_file,
+                output_file_path=output_file,
+                source_format='mp3',
+                target_format='flac',
+                max_iterations=2,
+                threshold_value=0.6,
+                target_bitrate_kbps=800,
+                toggle_normalize=True,
+                toggle_autoscale=True,
+                toggle_adaptive_filter=True,
+            )
+
+            info = sf.info(output_file)
+            out_data, _ = sf.read(output_file, always_2d=True)
+            self.assertTrue(
+                np.all(np.isfinite(out_data)),
+                "upscale() with toggle_adaptive_filter=True produced "
+                "NaN/Inf samples."
+            )
+            self.assertGreater(
+                np.sqrt(np.mean(out_data ** 2)), 1e-3,
+                "upscale() with toggle_adaptive_filter=True produced "
+                "(near) silent output."
+            )
+            self.assertLess(
+                np.mean(np.abs(out_data) > 0.999), 0.05,
+                "upscale() with toggle_adaptive_filter=True clipped "
+                "more than 5% of output samples to full scale."
+            )
+
+            mono = out_data[:, 0]
+            windowed = (mono - np.mean(mono)) * np.hanning(len(mono))
+            spectrum = np.abs(np.fft.rfft(windowed))
+            out_freqs = np.fft.rfftfreq(len(mono), 1.0 / info.samplerate)
+            self.assertAlmostEqual(
+                out_freqs[np.argmax(spectrum)], 440.0, delta=10.0,
+                msg="Dominant frequency of the adaptive-filtered "
+                    "upscaled output is not (close to) the source's "
+                    "440 Hz tone; lms_filter's block-adaptive rewrite "
+                    "may be distorting the signal when actually wired "
+                    "into upscale()."
+            )
+        finally:
+            if os.path.exists(output_file):
+                os.remove(output_file)
 
     @requires_gpu
     def test_target_bitrate_kbps_drives_bounded_realistic_upscale_factor(

@@ -1,0 +1,69 @@
+# audio-quality-checker run log
+Invocation (UTC): 20260906-054534
+User: github-actions[bot] (sanitized: github-actions-bot-)
+Branch: iterate-fat-llama/20260906-044742
+Commit under test: a7b5dd678e8ca2cbde95fe7fe5bff7b737739afc
+Cycle: 2 of iterate-fat-llama run for GitHub issue #20
+
+### [05:45:34 UTC] Step 0 — Setup / rules read
+Input: Dispatch prompt (cycle 2, issue #20, branch iterate-fat-llama/20260906-044742 @ a7b5dd6, no proposed_upscale_params).
+Action: Read .claude/agents/rules/audio-quality.md and .claude/rules/scope-and-safety.md in full; created this log file.
+Reasoning: Rules file is the source of truth for output contract, scoring, and the remote-GPU-first procedure.
+Output: Baseline (fixed reference) config selected; upscale_params_used.source = "baseline".
+
+### [05:46:00 UTC] Step 6a — Environment probe + remote GPU dispatch
+Input: branch iterate-fat-llama/20260906-044742, commit a7b5dd678e8ca2cbde95fe7fe5bff7b737739afc.
+Action: nvidia-smi -> not found; `import cupy; cupy.cuda.runtime.getDeviceCount()` -> CUDARuntimeError (no CUDA device). Confirmed HEAD == a7b5dd6 via git rev-parse. Commit was not on origin, so ran `git push origin iterate-fat-llama/20260906-044742` (008ff81..a7b5dd6) per rules 1b. Then called mcp__fllm-mcp-server__test_generate with the exact baseline params (max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, all three toggles True, mp3->flac, input_test.mp3 -> output_test.flac).
+Reasoning: No local CUDA device in this GitHub Actions runner, so the remote GPU path is not just preferred but the only viable path (local fallback impossible).
+Output: {"job_id":"643223916a7f43ef8414a0e06f71779c","status":"queued"}. Working tree had uncommitted changes only in .claude/log/* and docs/CURRENT_STATE.md (coordinator artifacts, no source/test changes), so the commit under test faithfully represents the source state.
+
+### [05:47:30 UTC] Step 1 — Exercise read_audio/write_audio on synthesized samples
+Input: pydub.generators.Sine fixtures (mono 440 Hz 1 s mp3; stereo 440/660 Hz 2 s mp3; mono 440 Hz 1 s wav), /tmp/aqc/step1_rw.py.
+Action: read_audio() then write_audio() to FLAC for each; inspected with soundfile + mutagen.flac.
+Reasoning: Verify the format-IO layer preserves sample rate/channels/duration and the waveform itself before judging the full pipeline.
+Output: PASS on all three.
+  mono440 mp3: read sr=44100, bitrate=63999 (64.0 kbps), ch=1, samples (44100,) 1-D (no bogus (N,2) reshape), peak 31212; written FLAC sr=44100 ch=1 dur=1.0000s PCM_24 real_bitrate=458.4 kbps; peak 1.0, rms 0.705, all finite, clipfrac 4.5e-5, dominant 440.00 Hz, corr(input_norm, written)=1.00000000, duration delta +0.00000 s.
+  stereo mp3: read sr=44100, bitrate=127997, ch=2, samples (88200, 2); written FLAC sr=44100 ch=2 dur=2.0000s PCM_24 917.2 kbps; clipfrac 6e-6, dominant 440.00 Hz, corr=1.00000000, duration delta +0.00000 s.
+  mono440 wav: read sr=44100, bitrate=705600, ch=1; written FLAC sr=44100 dur=1.0000s PCM_24 435.2 kbps; clipfrac 0.029 (pure full-scale sine crest, expected), dominant 440.00 Hz, corr=1.00000000.
+  Conclusion: bitrate/sample-rate/channels/duration all preserved exactly; write_audio's peak-normalize keeps waveform identity (corr 1.0), no clamping defect.
+
+### [05:48:00 UTC] Step 2 — Review test_feed.py for assertion coherence
+Input: fat_llama/tests/test_feed.py (799 lines, 12 tests).
+Action: Read all 12 tests; ran `python -m unittest fat_llama.tests.test_feed -v`.
+Reasoning: Check whether assertions verify audio content vs. mere file existence.
+Output: 4 passed, 8 skipped (requires_gpu -- no CUDA device on this runner), 0 failed. Assertion coherence is generally strong: every file-producing test asserts sample rate, channels, duration, finiteness, non-silence, clipping fraction, and dominant-frequency preservation; no "file exists" only tests found. Gaps recorded as findings: (a) no end-to-end upscale() test runs with toggle_adaptive_filter=True (both e2e tests set it False), so issue #20's own subject stage has no e2e coverage; (b) no test asserts block-adaptive LMS (block_size=256) agrees with the documented-equivalent per-sample path (block_size=1), despite the docstring's "block_size=1 reproduces the exact prior per-sample update" claim; (c) no test asserts the runtime/sequential-iteration-count property the issue #20 fix is actually about.
+
+### [05:48:30 UTC] Step 3 — Fix an incoherent assertion
+Input: test_lms_block_ranges_partitions_range_exactly.
+Action: Edited fat_llama/tests/test_feed.py -- the test's own comment claimed "every block except possibly the last must be exactly block_size long" but the loop only asserted `<= block_size`. Added an assertEqual for every non-final block. Re-ran the test.
+Reasoning: The comment/assertion mismatch meant a partition emitting short blocks (silently giving back issue #20's ~n/block_size sequential-iteration speedup) would still pass. Trivial, in-scope assertion strengthening.
+Output: PASS. Left the three coverage gaps above to generate-code (they need new GPU-gated tests, not assertion edits).
+
+### [05:49:30 UTC] Step 6b — Remote GPU baseline run completed; output received
+Input: job_id 643223916a7f43ef8414a0e06f71779c.
+Action: Polled get_test_generate_status (queued -> provisioning -> running -> succeeded). On success: `git fetch origin iterate-fat-llama/20260906-044742` then `git merge --ff-only d31a6fea7c6f6846a8f0a65f0d4f459da3830cd0` to receive the job's own committed output_test.flac (fast-forward chosen over `reset --hard` so the coordinator's uncommitted docs/CURRENT_STATE.md and this run's test-assertion edit were not destroyed; no commit/stage was authored by me).
+Reasoning: No local CUDA device, so remote was the only path; the job commits its output back to the branch, which a fast-forward receives cleanly.
+Output: status=succeeded, push_status=succeeded, result_commit_sha=d31a6fea7c6f6846a8f0a65f0d4f459da3830cd0.
+  WALL CLOCK (issue #20's runtime report): created_at 2026-09-06T05:46:12.856Z -> done 2026-09-06T05:49:18.195Z = 3 min 05 s for the ENTIRE remote job (GPU provisioning + clone + deps + CUDA init + full baseline upscale with toggle_adaptive_filter=True + artifact upload + git push). Compare cycle-1's measurement of ~27.5 min for lms_filter alone / ~20 min for the whole baseline. The adaptive-filter runtime regression is resolved.
+  Worker stderr confirms: "Original MP3 bitrate: 192.00 kbps" / "Upscale factor set to: 4" (was 7 pre-fix) / "Stereo channels detected" / "Applying adaptive filtering..." / "Applying final Nyquist cutoff at 22050.0 Hz (original sample rate 44100 Hz)" / "Saved processed FLAC file at output_test.flac".
+  Params used: BASELINE (example.py's exact call) -- input_test.mp3 -> output_test.flac, mp3->flac, max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, toggle_normalize/autoscale/adaptive_filter all True. Nothing invented, nothing varied.
+  Local files: output_test.flac now 3,520,259 bytes (was 4,523,028 pre-fix at 308700 Hz).
+
+### [05:50:30 UTC] Steps 4-6c — Output inspection + coherence score
+Input: output_test.flac (fresh), input_test.flac (reference), input_test.mp3 (source), /tmp/aqc/score.py.
+Action: soundfile/mutagen property inspection; native-rate above-Nyquist FFT check; then mono-downmix + resample_poly to 308700 Hz + trim-to-min alignment, then clipping / dropout / invalid / discontinuity / added-detail checks per the rules' Coherence section.
+Reasoning: Rules require every score to trace to a measured number against the input_test.flac reference.
+Output: ALL COHERENCE CHECKS PASS.
+  Properties: out sr=176400 Hz (= 44100 * 4, <= MAX_REALISTIC_SAMPLE_RATE_HZ 192000; pre-fix was 308700 Hz), ch=2 (preserved), frames=2670216 = exactly 4 x the decoded mp3's 667554, dur=15.1373 s vs decoded source 15.1370 s (delta +0.28 ms), subtype PCM_24. Real file bitrate 1860.4 kbps (raw-PCM upper bound at this rate 8467 kbps; pre-fix file was 2390.9 kbps at 308700 Hz). Realistic for 24-bit/176.4 kHz stereo FLAC.
+  Above original Nyquist (22050 Hz), measured on the NATIVE 176400 Hz output: ch0 peak -148.9 dB, rms -186.9 dB rel in-band peak; ch1 peak -138.9 dB, rms -186.6 dB. At the FFT noise floor -- hard constraint satisfied. (Context: the legacy reference input_test.flac itself carries -57.4 dB there, an artifact of the old 7x pipeline; the comparison image masks that band per the rules.)
+  Invalid samples: 0 NaN/Inf. Clipping fraction: output 9.0e-6 vs reference 1.69e-4 (output cleaner). Dropouts >50 ms: 0 in output, 0 in reference, 0 output-only. Discontinuity 99.9th pct |diff|: output 0.01567 vs reference 0.05818 (ratio 0.269, output smoother -- no injected clicks/pops); max |diff| 0.0417 vs 0.2522.
+  Added detail below original Nyquist (mean STFT band level, dB rel each signal's own max): 0-1k +0.43, 1k-4k -0.22, 4k-8k +0.01, 8k-12k +0.46, 12k-16k +1.10, 16k-19k +2.02, 19k-22.05k +2.98 dB. Mean +0.97, std 1.07. A monotone high-frequency tilt concentrated in the reference's least-populated bands, NOT a broadband floor lift (low/mid bands flat within +/-0.5 dB). Cycle 1's +6.12 dB broadband in-band noise-floor rise is gone.
+  COHERENCE SCORE = 9 (clean on every check incl. above-Nyquist; HF energy measurably up but modest, and its provenance as genuine detail vs. mild processing noise is not conclusively separable given the reference is itself a legacy pipeline artifact -- so 9, not 10).
+
+### [05:51:00 UTC] Step 7 — Spectral deviation score + spectrogram comparison image
+Input: input_test.flac (ground truth) vs output_test.flac; /tmp/aqc/score.py, /tmp/aqc/spectro.py.
+Action: Fixed algorithm exactly as specified -- soundfile read, mono downmix, float64, resample_poly output 176400 -> 308700 (up=7/down=4), trim to min length (4,672,878 samples), scipy.signal.stft nperseg=2048 noverlap=1024, per-spectrogram max normalization, Frobenius spectral convergence + Pearson correlation. Image: imported read_mp3/read_flac/normalize from analysis.py, scipy.signal.spectrogram nperseg=2048, 3 stacked shared-x panels (mp3 -> reference -> output), shared vmin=-120/vmax=0 colorbar, spectrogram rows above 22050 Hz MASKED (not merely axis-limited).
+Reasoning: Run the pinned algorithm verbatim so scores stay comparable cycle to cycle.
+Output: spectral_convergence=0.8165, correlation=0.9830, combined=0.8998 -> SPECTRAL DEVIATION SCORE = 9.0. (Context: time-domain Pearson 0.9831; rms ref 0.1914 vs out 0.1892.) Image written to docs/images/spectrogram_comparison.png (633,855 bytes) -- output panel visually tracks the reference's structure, MP3 lowpass shelf and transient pattern, no visible artifacts.
+
+### [05:51:30 UTC] DONE — Remote-GPU baseline run on a7b5dd6 succeeded in 3 min 05 s wall clock (vs ~20-27 min pre-fix); output 176400 Hz / 1860.4 kbps (vs 308700 Hz pre-fix); coherence 9/10, spectral deviation 9.0/10; all coherence checks pass; one test assertion strengthened; 3 test-coverage gaps reported to generate-code.
