@@ -204,7 +204,7 @@ def iterative_soft_thresholding(data, max_iter, threshold):
         initialize_ist) and each iteration's raw FFT-bin magnitude, not
         scaled relative to `data`'s own amplitude.
 
-    Known issue (investigated, not fixed as of cycle 3): `data` here is
+    Known issue (investigated, not fixed as of cycle 4): `data` here is
     raw-PCM-scale (peak ~1e4-3e4), while `threshold`'s conventional
     default (0.6) is many orders of magnitude smaller. Measured (cycle 3,
     real ~15s input_test.mp3 channel): median FFT-bin magnitude ~9.3e4,
@@ -212,117 +212,65 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     near-zero bins) in both the time- and frequency-domain steps below --
     the "keep significant frequencies, discard noise" mechanism this
     function is meant to perform barely triggers at real audio's actual
-    scale, leaving iteration_soft_thresholding to mostly perform
+    scale, leaving iterative_soft_thresholding to mostly perform
     near-lossless FFT/IFFT round trips rather than genuine sparse
-    reconstruction. This cycle fixed the harmonic term's scale (see
-    below) since that is IST's other, independently measurable source
-    of added detail, but did not change `threshold`'s absolute-vs-
-    relative semantics -- doing so changes default-value tuning and
-    IST's masking behavior more broadly, and needs dedicated evaluation
-    against real audio in its own cycle rather than folding it in here.
+    reconstruction. Flagged as a strong future-cycle candidate (convert
+    to a peak-relative fraction) but not changed here -- this cycle's
+    finding/fix (below) is scoped to the harmonic term only.
+
+    Harmonic-reconstruction term removed (cycle 4): cycles 2-3 added a
+    per-iteration sinusoidal "harmonic reconstruction" term on top of the
+    thresholding round trip above, meant to reconstruct missing/congested
+    high-frequency detail. Across three consecutive cycles that term kept
+    needing correction for a new artifact it introduced -- unbounded
+    growth with max_iter (cycle 2), then a subsonic ~0.066 Hz tone
+    (cycle 3's own fix for cycle 2's remaining defect), and finally (this
+    cycle) a constant, non-source, audible drone: cycle 3 derived the
+    term's frequency from `cp.argmax` of that iteration's own masked FFT,
+    but that FFT is taken over the *entire* buffer (n ≈ 2.67M samples
+    for a real ~15s upscaled channel) rather than any local window, so
+    its single dominant bin is essentially the same value on every one
+    of up to 300 iterations and across the whole track -- a static tone
+    (measured by audio-quality-checker: a constant 98.168 Hz component at
+    -28.7 dBFS spanning the entire output, plus its own overtone), not
+    time-varying content-derived detail. Its amplitude was also a single
+    value derived from the buffer's global peak, applied uniformly
+    regardless of local signal level, so it behaved as a hard floor that
+    only became audible in the many places where real content was
+    quieter than it -- collapsing measured dynamic range in quiet
+    passages from 57.1 dB (reference) to 25.4 dB (output).
+
+    This cycle removes the harmonic-reconstruction term entirely rather
+    than attempting a fourth revision of it, for several converging
+    reasons: (1) a genuinely time-varying, artifact-free version would
+    need real per-frame/local-window frequency and energy estimation with
+    careful phase continuity across frame boundaries (to avoid clicks) --
+    that is nontrivial DSP engineering this run cannot verify end-to-end
+    against real audio without the GPU-based audio-quality-checker
+    pipeline, which this function's own tests do not have access to;
+    (2) naively nesting a per-block Python loop inside a function
+    already run up to 300 times over ~2.67M samples/channel risks
+    reintroducing exactly the kind of runtime blowup issue #20's
+    lms_filter fix addressed elsewhere in this same file; (3) per the
+    "Known issue" above, IST's threshold masking barely triggers at real
+    audio scale regardless, so removing the harmonic term returns this
+    function to IST's plain textbook form (init-threshold, then repeated
+    FFT / frequency-domain-threshold / IFFT) -- exactly what the
+    README/paper describe, with no synthetic tone bolted on. A properly
+    windowed, locally energy-gated re-introduction remains a legitimate
+    future direction, but only once it can be verified against real
+    audio quality metrics rather than shipped speculatively.
 
     Returns:
     cp.ndarray: The processed audio data after IST.
     """
     data_thres = initialize_ist(data, threshold)
-    n = len(data_thres)
-    half = n // 2
-
-    # The harmonic reconstruction term below is added to data_thres every
-    # iteration, and data_thres carries forward from one iteration to the
-    # next. Its FFT magnitude scales with array length, so it trivially
-    # survives the fixed absolute `threshold` and is never removed by
-    # masking -- left at a fixed per-iteration amplitude, its contribution
-    # to the output would accumulate roughly linearly with max_iter instead
-    # of converging (measured: max|output| grew from ~0.88 at max_iter=1 to
-    # ~30.8 at max_iter=300, an unbounded, iteration-count-dependent rise).
-    # Scaling by 1/max_iter keeps the *total* injected harmonic energy
-    # constant regardless of how many iterations run -- identical behavior
-    # to before at max_iter=1, but no longer scaling with iteration count --
-    # without changing the FFT/IST method itself.
-    #
-    # As of the cycle 3 fix, that total is also scaled by `data`'s own peak
-    # amplitude instead of being a fixed absolute constant (0.1). `data`
-    # here is the already-interpolated, raw-PCM-scale channel (peak on the
-    # order of 1e4-3e4 for 16-bit-sourced audio), not a normalized [-1, 1]
-    # signal -- and this whole pipeline never normalizes before calling
-    # this function. A fixed absolute total of 0.1 against a peak of ~3e4
-    # is an ~1e-5 relative contribution: unmeasurable after the pipeline's
-    # later autoscale/normalize steps, which only apply a global scalar
-    # gain and cannot change that ratio. Measured directly (cycle 3): with
-    # the old fixed-0.1 total, a 10,000x increase in signal peak shrank the
-    # harmonic term's relative contribution by the same 10,000x (0.077 ->
-    # 7.7e-6); scaling by peak keeps the relative contribution constant
-    # (~0.10) regardless of the input's absolute scale, restoring a
-    # genuinely audible (not swamped) contribution at real PCM scale.
-    peak = float(cp.max(cp.abs(data)))
-    harmonic_amplitude = (0.1 * peak) / max_iter if peak > 0 else 0.0
-
-    # Fixed sample phase for the harmonic term: an integer number of
-    # cycles fits exactly across the buffer (arange(n)/n is periodic at
-    # n, unlike the prior linspace(0, 2*pi, n)'s inclusive endpoint,
-    # which put n-1 steps between 0 and a repeated-looking 2*pi and so
-    # was not exactly periodic at the buffer boundary).
-    if n > 0:
-        phase = cp.arange(n, dtype=cp.float64) / n
-    else:
-        phase = cp.zeros(0, dtype=cp.float64)
 
     for _ in range(max_iter):
         data_fft = cp.fft.fft(data_thres)
         mask = cp.abs(data_fft) > threshold
         data_fft_thres = cp.where(mask, data_fft, 0)
         data_thres = cp.fft.ifft(data_fft_thres).real
-
-        # Harmonic reconstruction: add an overtone of the signal's own
-        # dominant retained frequency component, instead of a fixed,
-        # buffer-length-independent single-cycle sinusoid. The prior
-        # cp.sin(cp.linspace(0, 2*pi, len(data_thres))) spans exactly
-        # ONE cycle across the WHOLE buffer no matter how long it is or
-        # what it contains -- for any real multi-thousand-sample
-        # upscaled buffer (e.g. ~15s at 176.4 kHz) that lands at a
-        # subsonic ~sample_rate/n frequency (~0.066 Hz measured), not
-        # audible, content-derived detail (found by audio-quality-
-        # checker: a non-source 0.066 Hz sine at -26.2 dBFS, IST's only
-        # measurable contribution). This function has no sample_rate
-        # parameter (data is expressed purely in samples), so the fix
-        # stays entirely in "cycles per buffer" terms: reuse this
-        # iteration's own FFT (data_fft/data_fft_thres, already computed
-        # above for the masking step) to find the dominant non-DC
-        # retained bin, and inject its first overtone (2x its bin index,
-        # one octave up) -- a standard harmonic-exciter DSP technique
-        # (synthesize an overtone of an existing partial) that ties the
-        # injected content to what the signal itself actually contains,
-        # rather than an arbitrary externally-imposed tone. This
-        # automatically tracks the input: a low-frequency-dominated
-        # buffer gets a low-frequency overtone, a high-frequency-
-        # dominated one gets a higher overtone, both expressed as a
-        # fraction of the buffer's own bin spacing rather than a fixed
-        # absolute frequency. Content this pushes above the original
-        # Nyquist frequency (e.g. overtones of already-high partials)
-        # is still removed by the pipeline's unconditional final
-        # apply_original_nyquist_cutoff stage, consistent with the
-        # "no content above the original Nyquist" hard constraint.
-        if half > 1:
-            retained_magnitudes = cp.abs(data_fft_thres[1:half])
-            if float(cp.max(retained_magnitudes)) > 0:
-                dominant_bin = int(cp.argmax(retained_magnitudes)) + 1
-            else:
-                # Degenerate case: nothing survived thresholding in
-                # either domain (e.g. a near-silent segment), so there
-                # is no retained content to take an overtone of. Fall
-                # back to a fixed mid-band bin (roughly a quarter of the
-                # way to this buffer's own Nyquist bin) rather than bin
-                # 1 -- at real buffer lengths, bin 1 is exactly the
-                # subsonic ~sample_rate/n frequency this fix removes,
-                # and this fallback should not reintroduce it.
-                dominant_bin = max(1, half // 4)
-            harmonic_bin = min(2 * dominant_bin, half - 1)
-        else:
-            harmonic_bin = 1
-
-        harmonics = cp.sin(2 * cp.pi * harmonic_bin * phase)
-        data_thres += harmonic_amplitude * harmonics
 
     return data_thres
 
