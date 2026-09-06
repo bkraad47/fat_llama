@@ -1,0 +1,15 @@
+The run is complete. Summary:
+
+**Issue #20 resolved** — both reported symptoms fixed and confirmed on real GPU hardware:
+- Unrealistic output sample rate/bitrate (~308,700 Hz / ~2391 kbps → 176,400 Hz / ~1876 kbps) — fixed by bounding `compute_upscale_factor()` to a 192 kHz realistic ceiling.
+- Adaptive-filter runtime (~27.5 min → well under 3 min total) — fixed by rewriting `lms_filter` as a block-adaptive LMS filter.
+- Along the way, also found and fixed (after two false starts) a pre-existing IST harmonic-term defect that was injecting an inaudible-then-audible artificial tone; it's now removed entirely, restoring full dynamic range with no tradeoff.
+
+**Process:** 4 fix cycles kept (scores 0.69 → 0.86 → 0.83 → 0.82 → 0.92), stopped at cycle 5 via the satisfactory-results early-stop condition (coherence 9.0, spectral deviation 9.9, no code bugs, DIRECTIVES satisfied) — no rollback needed.
+
+**One wrinkle:** the intended branch/version `v-1.4.1` was already taken by an orphaned, unmerged branch from an earlier run at this same issue (no PR ever referenced it). Rather than force-push over that prior work, I bumped to `v-1.4.2` instead.
+
+**Result:** branch `v-1.4.2` pushed to origin. `gh` isn't authenticated in this sandbox, so no PR was opened — here's the compare link: https://github.com/bkraad47/fat_llama/compare/main...v-1.4.2
+
+ITERATE_FAT_LLAMA_DONE_JSON:
+{"outcome": "compare_link_given", "pr_url_or_compare_link": "https://github.com/bkraad47/fat_llama/compare/main...v-1.4.2", "version": "1.4.2", "cycles_run": 5, "kept_cycle": 4}
