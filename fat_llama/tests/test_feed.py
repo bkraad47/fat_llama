@@ -619,6 +619,76 @@ class TestAudioFattener(unittest.TestCase):
         )
 
     @requires_gpu
+    def test_ist_harmonic_term_lands_in_audible_band(self):
+        # Regression test for a finding this cycle (audio-quality-checker,
+        # test_ist_harmonic_term_contributes_audible_detail): the harmonic
+        # reconstruction term used to be cp.sin(cp.linspace(0, 2*pi,
+        # len(data_thres))) -- exactly ONE cycle across the WHOLE buffer,
+        # regardless of buffer length or content. For a real ~15s
+        # upscaled buffer that lands at a ~0.066 Hz subsonic oscillation
+        # (measured: a non-source 0.066 Hz sine at -26.2 dBFS, costing
+        # 2.6% of peak headroom for content nobody can hear), not audible
+        # added detail. The fix reuses each iteration's own FFT (already
+        # computed for the masking step) to find the dominant retained
+        # frequency component and injects its first overtone (2x its bin
+        # index) instead -- content genuinely derived from what the
+        # signal already contains, landing wherever that content's own
+        # frequency is (doubled), not at a fixed subsonic rate.
+        #
+        # This test isolates the harmonic term the same way
+        # test_ist_harmonic_amplitude_scales_with_signal_peak does (a
+        # negligible threshold, so the FFT/IFFT round trip is near-
+        # identity and the harmonic term is the dominant source of
+        # change), then checks the *frequency* of the added content
+        # instead of its amplitude: it must track the input's own
+        # dominant frequency (here treating the 1-second synthetic
+        # buffer's bin spacing as Hz), not sit at a fixed ~1 Hz
+        # regardless of input.
+        n = 2000
+        t = cp.linspace(0, 1, n, endpoint=False)
+        negligible_threshold = 1e-9
+        max_iter = 10
+
+        def dominant_added_frequency(signal):
+            out = iterative_soft_thresholding(
+                signal.copy(), max_iter, negligible_threshold
+            )
+            added = cp.asnumpy(out - signal)
+            spectrum = np.abs(np.fft.rfft(added))
+            freqs = np.fft.rfftfreq(n, d=1.0 / n)
+            spectrum[0] = 0  # ignore DC
+            return float(freqs[np.argmax(spectrum)])
+
+        signal_300 = (
+            0.8 * cp.sin(2 * cp.pi * 300 * t)
+            + 0.3 * cp.sin(2 * cp.pi * 700 * t)
+        )
+        signal_100 = (
+            0.8 * cp.sin(2 * cp.pi * 100 * t)
+            + 0.3 * cp.sin(2 * cp.pi * 900 * t)
+        )
+
+        freq_300 = dominant_added_frequency(signal_300)
+        freq_100 = dominant_added_frequency(signal_100)
+
+        # Must not be the old bug's fixed ~1 Hz subsonic injection,
+        # regardless of what the input's dominant frequency is.
+        self.assertGreater(
+            freq_300, 20.0,
+            "iterative_soft_thresholding's harmonic term landed at "
+            f"{freq_300:.3g} Hz-equivalent for a 300 Hz-dominated input -- "
+            "at or near the old bug's fixed ~1 Hz subsonic injection "
+            "(one cycle across the whole buffer) rather than audible, "
+            "content-derived detail."
+        )
+        # Must track the input's own dominant frequency (here, its first
+        # overtone/octave) rather than sit at one fixed frequency
+        # regardless of content.
+        self.assertAlmostEqual(freq_300, 600.0, delta=5.0)
+        self.assertAlmostEqual(freq_100, 200.0, delta=5.0)
+        self.assertNotAlmostEqual(freq_300, freq_100, delta=50.0)
+
+    @requires_gpu
     def test_new_interpolation_algorithm_is_bandlimited(self):
         # Regression test for a cycle 3 finding: new_interpolation_
         # algorithm used zero-order-hold duplication (each sample
@@ -867,6 +937,35 @@ class TestAudioFattener(unittest.TestCase):
 
             info = sf.info(output_file)
             out_data, _ = sf.read(output_file, always_2d=True)
+
+            # Container-level properties must survive the adaptive-filter
+            # stage too, not just the sample values: lms_filter returns a
+            # same-length array, so the output must keep the bounded
+            # sample rate compute_upscale_factor derived and the input's
+            # ~1 s duration. Without these, a stage that silently dropped
+            # or duplicated samples (e.g. a block-partitioning off-by-one
+            # at the tail) would still pass every check below.
+            _, _, source_bitrate, _ = read_audio(
+                self.test_mp3_file, audio_format='mp3'
+            )
+            expected_upscale_factor = compute_upscale_factor(
+                44100, source_bitrate, 800
+            )
+            self.assertEqual(
+                info.samplerate, 44100 * expected_upscale_factor,
+                "Adaptive-filtered output sample rate does not match "
+                "compute_upscale_factor's formula."
+            )
+            self.assertLessEqual(
+                info.samplerate, MAX_REALISTIC_SAMPLE_RATE_HZ
+            )
+            self.assertAlmostEqual(
+                info.duration, 1.0, delta=0.05,
+                msg="Adaptive-filtered output duration does not match the "
+                    "1 s input; lms_filter must not change the signal's "
+                    "length."
+            )
+
             self.assertTrue(
                 np.all(np.isfinite(out_data)),
                 "upscale() with toggle_adaptive_filter=True produced "

@@ -1,0 +1,6 @@
+### [06:01:25 UTC] Step 1-6 — enumerate, factblock, write
+Input: git diff against candidate C_1 (cycle 2's committed changes, test-only). Dispatched by iterate-fat-llama cycle 3, step (a).
+Action: cycle 2 only touched fat_llama/tests/test_feed.py (3 new tests, 1 strengthened assertion) -- no feed.py changes. Updated docs/CURRENT_STATE.md: added factblocks for test_lms_filter_block_size_one_matches_reference_per_sample_update, test_lms_filter_block_size_bounds_sequential_iterations, test_upscale_end_to_end_with_adaptive_filter_enabled; updated all shifted test_feed.py line numbers; updated the module description; updated Notes to reflect the runtime fix now being confirmed on a real GPU (3m05s total remote job vs 27.5min) and the block-adaptive tradeoff now being validated against a live coherence score (9.0, no regression) rather than "not yet validated"; updated the "no e2e adaptive-filter test" note to "closed, mono only -- stereo still a gap".
+Reasoning: keep the factblock accurate for C_2 before test-fat-llama scores it.
+Output: docs/CURRENT_STATE.md updated (20 factblocks across 5 source files + 1 test class, up from 17).
+### [06:01:25 UTC] DONE — docs/CURRENT_STATE.md updated for C_2 (3 new test factblocks, notes refreshed to reflect confirmed runtime fix + validated coherence).
