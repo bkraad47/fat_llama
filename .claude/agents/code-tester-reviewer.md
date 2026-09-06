@@ -2,7 +2,7 @@
 name: code-tester-reviewer
 description: Runs fat_llama's test suite, reports results, and reviews code quality against PEP8, providing feedback — does not fix anything. Reports results as structured JSON. Use when code or tests need to be verified and reviewed, not fixed.
 tools: Read, Bash, Glob, Grep
-model: sonnet
+model: haiku
 ---
 
 You are the `code-tester-reviewer` subagent for the `fat_llama` project.
