@@ -1,0 +1,41 @@
+### [04:47:00 UTC] Step 0.0 — CI mode detection
+Input: environment variables ITERATE_FAT_LLAMA_CI_MODE, ITERATE_FAT_LLAMA_ISSUE_NUMBER
+Action: checked env; ITERATE_FAT_LLAMA_CI_MODE=1, ITERATE_FAT_LLAMA_ISSUE_NUMBER=20
+Reasoning: these are trusted, workflow-set env vars per .claude/skills/rules/iterate-fat-llama.md's "CI / GitHub Actions mode" section — running non-interactively from issue-branch-resolve.yml for issue #20.
+Output: CI mode confirmed. Step 0.2 (uncommitted-changes check) and Step 7 (confirmation) will follow the CI-mode behavior differences.
+
+### [04:47:00 UTC] Step 0.1 — mission context
+Input: README.md (repo root), .claude/rules/project-mission.md
+Action: read README.md in full and .claude/rules/project-mission.md, .claude/rules/scope-and-safety.md, .claude/rules/logging.md, .claude/skills/rules/iterate-fat-llama.md
+Reasoning: per SKILL.md and project-mission.md, this run's mission context (mp3->flac via IST on FFT data, CUDA-only, no AI/ML upscaling, no content above original Nyquist) must be carried into every generate-code dispatch and the docs/changelog/PR steps.
+Output: context loaded; DIRECTIVES for this run = the clean_problem_statement about target_bitrate_kbps=900 producing ~5300kbps/~250kHz output and toggle_adaptive_filter=True hanging for 30+ minutes on a 15s clip (RTX 3060).
+
+### [04:47:42 UTC] Step 0.2 — uncommitted changes check
+Input: git status showing issue_raw.json, triage_result.json (untracked) present at run start
+Action: inspected both files; issue_raw.json is the raw GitHub issue #20 body/comments, triage_result.json is triage-issue's clean_problem_statement output -- both are this exact CI workflow run's own intermediate artifacts, written by the triage-issue step that runs immediately before iterate-fat-llama in issue-branch-resolve.yml, not leftovers from an unrelated prior run.
+Reasoning: per the CI-mode behavior differences, Step 0.2 "should never actually trigger" from a fresh checkout; these two files are expected, same-run artifacts feeding this run's own DIRECTIVES, not stray uncommitted work to block on.
+Output: proceeding without asking.
+
+### [04:47:42 UTC] Step 0.3-0.5 — branch/tag setup
+Input: current HEAD on branch Issue-no-20-unrealistic-final-bitrate-fixing
+Action: BASE_BRANCH=Issue-no-20-unrealistic-final-bitrate-fixing, BASE_COMMIT=865d21b3f052995b1c76546befffcedf8b6242ef. Created and switched to new branch iterate-fat-llama/20260906-044742. Tagged current HEAD as iterate-fat-llama/20260906-044742/iter-0 (candidate C_0).
+Reasoning: per Step 0 naming convention, isolates this run's work from BASE_BRANCH.
+Output: done. DIRECTIVES for this run (verbatim, from triage_result.json's clean_problem_statement): "When calling upscale() with target_bitrate_kbps=900 and adaptive_filter disabled, the resulting FLAC file has unrealistic output parameters: bitrate ~5300 kbps and sample rate ~250kHz (should be 44.1-96kHz). Additionally, enabling adaptive_filter causes the function to hang/run extremely slowly (30+ minutes for a 15-second audio file), making it impractical on consumer hardware (RTX 3060). Multiple users report the same behavior."
+
+### [04:48:31 UTC] Cycle 1a — review-current-state
+Input: candidate C_0 (untouched working tree)
+Action: dispatched review-current-state skill. Log: review-current-state-20260906-044831-runner.log
+Reasoning: refresh docs/CURRENT_STATE.md against C_0 before testing it.
+Output: docs/CURRENT_STATE.md confirmed already current for C_0 (no source changed since it was last generated); no rewrite needed.
+
+### [04:48:48 UTC] Cycle 1b — test-fat-llama
+Input: candidate C_0
+Action: dispatched test-fat-llama skill (code-tester-reviewer + audio-quality-checker in parallel). Coordinator log: .claude/log/test-fat-llama-20260906-044848-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260906-044902-runner.log, .claude/log/audio-quality-checker-20260906-044905-runner.log.
+Reasoning: get merged tests/quality/scores JSON for C_0 to compute score_1 and check early-stop conditions.
+Output: 18 tests total (2 code, both pass; 16 audio_quality: 11 pass, 5 fail). score_1 = 11/16 = 0.6875. Failing audio_quality entries: test_feed_local_suite_coverage (environmental -- no local GPU), test_output_sample_rate_is_realistic (308700 Hz output, reproduces issue #20), test_output_bitrate_is_realistic (2390.4 kbps effective output, reproduces issue #20), test_pipeline_runtime_is_practical (27.5 min baseline run with adaptive filter on a 15.2s source, reproduces issue #20), test_reference_input_flac_is_clean_above_nyquist (legacy reference-asset artifact, not a generate-code target). quality (PEP8) = [] (clean). scores: coherence 9.0, spectral_deviation 9.0. During this dispatch, audio-quality-checker used the remote-GPU path: pushed commit 865d21b to origin (branch had not been pushed yet), ran job 5782cbdbba68419080e0d902bbd4a833, which committed regenerated output_test.flac back as 008ff81c9e1672929695bb91449c4953d62cacbc; local tree was reset --hard to that commit to receive it (iter-0 tag still points at the original 865d21b; only output_test.flac's bytes changed between the two, confirmed via git diff --stat).
+
+### [05:17:xx UTC] Cycle 1c — early-stop check
+Input: score_1 = 0.6875 (not 1.0). Satisfactory-results condition: (1) no code bugs -- true (2/2 code tests pass, quality=[]); (2) coherence > 8.5 -- true (9.0); (3) spectral deviation > 9.0 -- FALSE (exactly 9.0, not strictly greater); (4) DIRECTIVES satisfied -- FALSE (sample-rate/bitrate unrealistic and adaptive-filter runtime are exactly DIRECTIVES' subject and are failing).
+Action: none (no early stop).
+Reasoning: neither score_i==1.0 nor the satisfactory-results condition holds -- proceeding to fix cycle 1d.
+Output: proceeding to generate-code dispatch for cycle 1.

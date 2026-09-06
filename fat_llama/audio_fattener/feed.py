@@ -14,6 +14,15 @@ from pydub import AudioSegment
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Consumer/professional playback hardware realistically supports sample
+# rates up to about 192 kHz -- nothing mainstream plays back higher, and
+# fat_llama upscales precision/headroom within the original recording's
+# real bandwidth rather than extending it (see
+# apply_original_nyquist_cutoff): any sample rate above this ceiling would
+# only ever carry silence in the extended band, at a real cost (file size,
+# IST/LMS runtime) for zero real benefit. See compute_upscale_factor.
+MAX_REALISTIC_SAMPLE_RATE_HZ = 192000
+
 
 def read_audio(file_path, audio_format):
     """
@@ -260,11 +269,41 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     return data_thres
 
 
+def _lms_block_ranges(start, n, block_size):
+    """
+    Partition [start, n) into consecutive, non-overlapping chunks of at
+    most `block_size` samples each, covering the whole range exactly
+    once, in order.
+
+    Extracted as a standalone, pure-Python generator (no CuPy) so the
+    block-partitioning logic behind lms_filter's block-adaptive update
+    (see its docstring, issue #20) can be unit-tested without a CUDA GPU
+    -- the actual per-block filtering math still requires cp.ndarray
+    input and is exercised by lms_filter's own (GPU-gated) regression
+    tests instead.
+
+    Parameters:
+    start (int): first index to include (the warm-up length).
+    n (int): one past the last index to include (the signal length).
+    block_size (int): maximum chunk length; must be >= 1.
+
+    Yields:
+    (int, int): (block_start, block_end) pairs, block_end exclusive,
+        with block_end - block_start <= block_size.
+    """
+    pos = start
+    while pos < n:
+        block_end = min(pos + block_size, n)
+        yield pos, block_end
+        pos = block_end
+
+
 def lms_filter(
-    signal, desired, mu=0.001, num_taps=32, delay=1, return_weights=False
+    signal, desired, mu=0.001, num_taps=32, delay=1, block_size=256,
+    return_weights=False
 ):
     """
-    Apply an LMS adaptive filter using CuPy.
+    Apply a block-adaptive LMS filter using CuPy.
 
     As of the cycle 3 fix, this is a self-referential Adaptive Line
     Enhancer (ALE) by default (`delay=1`): the predictor's tap vector is
@@ -276,6 +315,46 @@ def lms_filter(
     lag-decorrelated content as unpredictable, a standard DSP technique
     (Widrow's Adaptive Line Enhancer), not a new algorithm class.
 
+    Issue #20 fix: this used to update the tap-weight vector `w` once
+    per *sample* via a plain Python `for` loop -- each of the (up to
+    several million, post-upscale) iterations issued several small,
+    sequential CuPy/CUDA kernel calls (a slice, a dot product, an
+    elementwise update, a clip, a store) whose combined per-iteration
+    Python/kernel-launch overhead, not raw GPU compute, dominated
+    runtime (measured, audio-quality-checker: 27.5 minutes wall clock
+    for a 15.2s stereo source at a 7x-upscaled sample count of
+    4,672,878/channel -- enabling `toggle_adaptive_filter` was
+    impractical on consumer hardware). This replaces the per-sample
+    update with block-adaptive LMS (aka the Block LMS / block-adaptive
+    filter of Clark et al., 1981 -- a standard, long-documented LMS
+    variant, not a new or learned/trained algorithm): the tap weights
+    are held fixed across each block of up to `block_size` samples, the
+    whole block's filter output is computed with a small (`num_taps`-
+    length, not `block_size`-length) Python loop of vectorized
+    elementwise CuPy ops over the whole block at once, and `w` is
+    updated once per block using the block-averaged instantaneous
+    gradient (mean over the block of `e[j] * x[j]`, matching the
+    per-sample update's `2 * mu * e * x` in the limit `block_size == 1`
+    -- see the update step below for the algebra). This cuts the number
+    of sequential Python-loop iterations (and therefore sequential
+    kernel launches) from `n` to roughly `n / block_size`, while
+    remaining sequential/online across blocks -- still a genuinely
+    adaptive filter, just updated at block granularity instead of
+    sample granularity.
+
+    `block_size=1` reproduces the exact prior per-sample update
+    (verified algebraically: with a 1-sample block, the block-mean
+    gradient is exactly `e[0] * x[0]`, identical to the old per-sample
+    term) for callers that need bit-exact behavior; the default `256`
+    trades a small amount of intra-block adaptation granularity (mu is
+    small, 0.001 by default, so weight drift within one block is modest
+    in practice) for roughly two orders of magnitude fewer sequential
+    iterations. This is a genuine, disclosed accuracy/speed tradeoff --
+    if a future audio-quality run shows measurably worse coherence
+    attributable to this stage, reducing `block_size` (down to 1 for
+    the prior exact behavior) is the first lever to try before anything
+    else in this function.
+
     Known issue (found and fixed in cycle 3): `upscale()` always calls
     this as `lms_filter(channel, channel)` -- signal and desired are the
     *same* array. With the prior `delay=0` behavior (tap 0 was always
@@ -285,14 +364,13 @@ def lms_filter(
     zero and the LMS update never changed `w` from its initial value --
     confirmed by direct measurement (cycle 3): the filtered output was
     bit-identical to the input and `w` stayed at `[1, 0, ..., 0]` after a
-    full run. That made this stage an expensive (~18-19 of the pipeline's
-    ~20 minute runtime) no-op. With `delay=1`, `w` measurably evolves
-    (e.g. secondary taps moving from 0 to ~0.01-0.02 within 0.2s of
-    44.1kHz audio) and the filtered output is no longer bit-identical to
-    the input, while a highly-correlated-at-lag-1 signal (true of nearly
-    all real audio) keeps the near-identity initialization close enough
-    to the true minimum that no new warm-up dropout is introduced
-    (measured warm-up RMS ratio ~1.00, same regression test as cycle 1).
+    full run. With `delay=1`, `w` measurably evolves (e.g. secondary taps
+    moving from 0 to ~0.01-0.02 within 0.2s of 44.1kHz audio) and the
+    filtered output is no longer bit-identical to the input, while a
+    highly-correlated-at-lag-1 signal (true of nearly all real audio)
+    keeps the near-identity initialization close enough to the true
+    minimum that no new warm-up dropout is introduced (measured warm-up
+    RMS ratio ~1.00, same regression test as cycle 1).
 
     Parameters:
     signal (cp.ndarray): The input audio signal.
@@ -304,6 +382,9 @@ def lms_filter(
         >= 1 for `lms_filter(x, x, ...)` (signal is desired) to be a
         non-degenerate estimation problem; `0` reproduces the prior
         (now known-degenerate for that self-referential case) behavior.
+    block_size (int): Number of samples per block-adaptive weight
+        update (see above); `1` reproduces the exact prior per-sample
+        LMS update. Defaults to 256.
     return_weights (bool): If True, return `(filtered_signal, w)` -- the
         final tap-weight vector alongside the filtered signal -- instead
         of just `filtered_signal`. Defaults to False to preserve the
@@ -313,6 +394,7 @@ def lms_filter(
     cp.ndarray: The filtered audio signal (or `(filtered_signal, w)` if
         `return_weights` is True).
     """
+    block_size = max(1, int(block_size))
     n = len(signal)
     # Initialize the direct-lag tap to 1 (all others 0) instead of an
     # all-zero weight vector. With delay >= 1, x[0] is signal[i - delay],
@@ -330,25 +412,41 @@ def lms_filter(
     start = num_taps + delay
     filtered_signal[:start] = signal[:start]
 
-    for i in range(start, n):
-        # Extract a vector of the last 'num_taps' samples from the signal,
-        # lagged by 'delay' samples behind the sample being predicted.
-        x = signal[i - delay:i - delay - num_taps:-1]
+    for block_start, block_end in _lms_block_ranges(start, n, block_size):
+        block_len = block_end - block_start
 
-        # Compute the filter output: dot product of coefficients and input
-        y = cp.dot(w, x)
+        # Vectorized filter output for the whole block using the tap
+        # weights as of the *start* of this block (held fixed across
+        # the block -- this is the block-adaptive approximation). This
+        # loop runs `num_taps` times (e.g. 32), not `block_len` times:
+        # each iteration is one elementwise multiply-add over the whole
+        # block at once, not a per-sample scalar operation.
+        y_block = cp.zeros(block_len, dtype=cp.float64)
+        for k in range(num_taps):
+            lo = block_start - delay - k
+            hi = block_end - delay - k
+            y_block += w[k] * signal[lo:hi]
 
-        # Compute the error between the desired output and filter output
-        e = desired[i] - y
+        # Error between the desired output and the filter output, for
+        # every sample in the block at once.
+        e_block = desired[block_start:block_end] - y_block
 
-        # Update the filter coefficients using the LMS rule
-        w += 2 * mu * e * x
+        # Block LMS weight update: replace the per-sample instantaneous
+        # gradient `e * x` with its mean across the block, so `w` moves
+        # once per block instead of once per sample. At block_size == 1
+        # this is exactly `2 * mu * e[0] * x[0]` -- identical to the
+        # original per-sample update rule.
+        for k in range(num_taps):
+            lo = block_start - delay - k
+            hi = block_end - delay - k
+            grad_k = cp.sum(e_block * signal[lo:hi]) / block_len
+            w[k] = w[k] + 2 * mu * grad_k
 
         # Ensure the coefficients remain finite to avoid numerical issues
         w = cp.clip(w, -1e10, 1e10)
 
-        # Store the filter output in the filtered signal
-        filtered_signal[i] = y
+        # Store this block's filter output in the filtered signal
+        filtered_signal[block_start:block_end] = y_block
 
     if return_weights:
         return filtered_signal, w
@@ -456,6 +554,64 @@ def apply_original_nyquist_cutoff(
     return cp.fft.irfft(spectrum, n=n)
 
 
+def compute_upscale_factor(
+    sample_rate, source_bitrate_bps, target_bitrate_kbps
+):
+    """
+    Derive an integer upscale factor from target_bitrate_kbps, bounded so
+    the resulting sample rate (sample_rate * upscale_factor) stays within
+    a realistic consumer playback range.
+
+    Issue #20: the previous derivation --
+    round(target_bitrate_kbps * 1000 / source_bitrate_bps) -- compared a
+    target value calibrated to the *compressed-file* bitrate range
+    (target_bitrate_kbps's valid range is 800-1411 kbps for flac,
+    800-6444 kbps for wav) directly against the source's own *compressed*
+    bitrate (e.g. a typical mp3 at 128-192 kbps). That ratio routinely
+    lands at 5-7+ for realistic inputs (e.g. round(1400 / 192) = 7,
+    round(900 / 128) = 7), inflating the output sample rate far past any
+    realistic range (e.g. 44100 Hz * 7 = 308700 Hz) for no corresponding
+    gain in real information: apply_original_nyquist_cutoff guarantees
+    the overwhelming majority of that extra bandwidth is silence
+    (measured, audio-quality-checker: -140.2 dB above 22050 Hz for a 7x
+    upscale of 44100 Hz audio; decimating the output back to the
+    original rate and re-expanding it reproduced the 7x output to -66.7
+    dB error, confirming the extra rate carried no information). The
+    inflated sample count this produced was also the dominant multiplier
+    behind issue #20's second report -- lms_filter's per-sample loop
+    scales with sample count.
+
+    This keeps the original ratio as a starting point, so
+    target_bitrate_kbps keeps its documented contract (a higher value
+    still drives a larger factor, relative to the source's own bitrate),
+    but clamps the result so sample_rate * upscale_factor never exceeds
+    MAX_REALISTIC_SAMPLE_RATE_HZ (192 kHz) and never drops below 1 (this
+    is an upscaler, not a downscaler).
+
+    Parameters:
+    sample_rate (int): the source audio's sample rate, in Hz.
+    source_bitrate_bps (float or None): the source file's own bitrate, in
+        bits/sec, as returned by read_audio (None if undeterminable).
+    target_bitrate_kbps (int): the caller's requested target bitrate, in
+        kbps (already validated by the caller against the target format's
+        valid range).
+
+    Returns:
+    int: the upscale factor to use: >= 1, and such that
+        sample_rate * upscale_factor <= MAX_REALISTIC_SAMPLE_RATE_HZ
+        whenever sample_rate itself is already within that ceiling.
+    """
+    if source_bitrate_bps:
+        raw_factor = round(target_bitrate_kbps * 1000 / source_bitrate_bps)
+    else:
+        raw_factor = 4
+    raw_factor = max(raw_factor, 1)
+
+    max_factor = max(1, int(MAX_REALISTIC_SAMPLE_RATE_HZ // sample_rate))
+
+    return min(raw_factor, max_factor)
+
+
 def upscale(
     input_file_path,
     output_file_path,
@@ -482,15 +638,22 @@ def upscale(
     max_iterations (int): Maximum number of iterations for IST.
     threshold_value (float): Threshold value for IST.
     target_bitrate_kbps (int): Used only to derive the interpolation
-        upscale_factor relative to the source file's own bitrate
-        (upscale_factor = round(target_bitrate_kbps * 1000 / source
-        bitrate)); must itself fall within the valid range for the
-        target format (a sanity bound on this parameter, chosen to keep
-        the derived upscale_factor reasonable). This is NOT a promise
-        about the produced file's real bitrate: the output is always
-        written as uncompressed PCM (see write_audio) at an upsampled
-        sample rate, so its actual bitrate will be substantially higher
-        than target_bitrate_kbps by design once upscale_factor > 1.
+        upscale_factor relative to the source file's own bitrate --
+        see compute_upscale_factor for the exact formula; must itself
+        fall within the valid range for the target format (a sanity
+        bound on this parameter, chosen to keep the derived
+        upscale_factor reasonable). As of the issue #20 fix, the
+        derived factor is additionally clamped so the resulting sample
+        rate (sample_rate * upscale_factor) never exceeds
+        MAX_REALISTIC_SAMPLE_RATE_HZ (192 kHz) -- previously this
+        formula alone could drive sample rates well past 250 kHz for
+        realistic inputs, which apply_original_nyquist_cutoff would
+        guarantee is mostly silence anyway. This is NOT a promise about
+        the produced file's real bitrate: the output is always written
+        as uncompressed PCM (see write_audio) at an upsampled sample
+        rate, so its actual bitrate will be higher than
+        target_bitrate_kbps once upscale_factor > 1, though now bounded
+        to a realistic range rather than unbounded.
     toggle_normalize (bool): Whether to normalize the audio. Defaults to
         True.
     toggle_autoscale (bool): Whether to autoscale the audio based on the
@@ -532,9 +695,13 @@ def upscale(
     if audio.channels == 2:
         samples = samples.reshape((-1, 2))
 
-    # Determine the upscale factor
-    target_bitrate = target_bitrate_kbps * 1000
-    upscale_factor = round(target_bitrate / bitrate) if bitrate else 4
+    # Determine the upscale factor -- see compute_upscale_factor's
+    # docstring (issue #20) for why this is bounded to a realistic sample
+    # rate rather than an unbounded ratio of target_bitrate_kbps to the
+    # source's own (compressed) bitrate.
+    upscale_factor = compute_upscale_factor(
+        sample_rate, bitrate, target_bitrate_kbps
+    )
     logger.info("Upscale factor set to: %s", upscale_factor)
 
     # Process and upscale the audio channels
