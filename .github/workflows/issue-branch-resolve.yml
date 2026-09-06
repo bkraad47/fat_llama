@@ -76,7 +76,11 @@ jobs:
 
       - name: Install Claude Code CLI
         if: steps.guard.outputs.proceed == 'true'
-        run: npm install -g @anthropic-ai/claude-code
+        # Pinned rather than always installing whatever's newest on npm -- an unpinned
+        # install changes silently between runs and was the leading suspect (unconfirmed,
+        # no log access) behind a real "Run iterate-fat-llama" step crash (exit 127).
+        # Bump this deliberately, not automatically, and watch the next run when you do.
+        run: npm install -g @anthropic-ai/claude-code@2.1.263
 
       - name: Write MCP config
         if: steps.guard.outputs.proceed == 'true'
@@ -147,7 +151,6 @@ jobs:
           set +e
           ITERATE_RAW=$(claude -p "/iterate-fat-llama $CLEAN_STATEMENT" \
             --dangerously-skip-permissions \
-            --permission-prompts none \
             --mcp-config /tmp/mcp-ci.json \
             --strict-mcp-config \
             --output-format json \
@@ -186,13 +189,19 @@ jobs:
           fi
 
       - name: Report failure
-        if: steps.guard.outputs.proceed == 'true' && steps.iterate.outputs.failed == 'true'
+        # always() + steps.iterate.outcome: a real incident showed this step's own condition
+        # never firing when "Run iterate-fat-llama" crashed outright (exit 127, no GH comment
+        # posted at all) -- steps.iterate.outputs.failed is only set by that step's own last
+        # lines, which a crash never reaches. steps.iterate.outcome == 'failure' covers exactly
+        # that case; steps.iterate.outputs.failed == 'true' still covers the internal
+        # no-DONE_JSON detection for a step that exits 0 without proving completion.
+        if: always() && steps.guard.outputs.proceed == 'true' && (steps.iterate.outcome == 'failure' || steps.iterate.outputs.failed == 'true')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           FAILURE_JSON=$(grep -A 100 "ITERATE_FAT_LLAMA_FAILURE_JSON:" iterate_result.txt | tail -n +2 | sed -e '/^```/d' || true)
           if [ -z "$FAILURE_JSON" ]; then
-            FAILURE_JSON='{"stage": "unknown", "error": "claude_cli_error", "error_description": "claude -p exited non-zero, or exited cleanly without ever emitting an ITERATE_FAT_LLAMA_DONE_JSON completion block (a stalled/incomplete run is not treated as success)", "details": "See workflow run logs for the raw output."}'
+            FAILURE_JSON='{"stage": "unknown", "error": "claude_cli_error", "error_description": "The Run iterate-fat-llama step itself crashed (e.g. an unhandled shell error before iterate_result.txt could even be written), claude -p exited non-zero, or it exited cleanly without ever emitting an ITERATE_FAT_LLAMA_DONE_JSON completion block (a stalled/incomplete run is not treated as success)", "details": "See workflow run logs for the raw output."}'
           fi
 
           STAGE=$(echo "$FAILURE_JSON" | jq -r '.stage // "unknown"')
