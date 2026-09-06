@@ -157,6 +157,21 @@ jobs:
             echo "failed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Commit run logs
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing left to commit -- iterate-fat-llama already committed everything (or the run produced no on-disk changes)."
+          else
+            CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+            git commit -m "issue-branch-resolve: persist run logs/artifacts (workflow run ${{ github.run_id }})"
+            git push origin "HEAD:refs/heads/$CURRENT_BRANCH"
+            echo "Committed and pushed remaining run artifacts (including .claude/log/**) to $CURRENT_BRANCH."
+          fi
+
       - name: Report failure
         if: steps.guard.outputs.proceed == 'true' && steps.iterate.outputs.failed == 'true'
         env:
