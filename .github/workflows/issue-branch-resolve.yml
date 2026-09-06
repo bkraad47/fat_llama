@@ -151,10 +151,16 @@ jobs:
           ITERATE_RESULT=$(echo "$ITERATE_RAW" | jq -r '.result // empty')
           echo "$ITERATE_RESULT" > iterate_result.txt
 
-          if [ $CLAUDE_EXIT -ne 0 ] || echo "$ITERATE_RESULT" | grep -q "ITERATE_FAT_LLAMA_FAILURE_JSON:"; then
-            echo "failed=true" >> "$GITHUB_OUTPUT"
-          else
+          # A clean exit is not proof of success on its own -- a run that stalls or loses
+          # track of a dispatch mid-flight can exit 0 having done none of its actual work
+          # (confirmed via a real run: it narrated waiting on two dispatched skills, then
+          # stopped without ever calling them). Only trust a genuine completion signal:
+          # ITERATE_FAT_LLAMA_DONE_JSON: proves Step 7 was actually reached. Anything else --
+          # an explicit failure block, a non-zero exit, or neither block at all -- is failed.
+          if [ $CLAUDE_EXIT -eq 0 ] && echo "$ITERATE_RESULT" | grep -q "ITERATE_FAT_LLAMA_DONE_JSON:" && ! echo "$ITERATE_RESULT" | grep -q "ITERATE_FAT_LLAMA_FAILURE_JSON:"; then
             echo "failed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Commit run logs
@@ -179,7 +185,7 @@ jobs:
         run: |
           FAILURE_JSON=$(grep -A 100 "ITERATE_FAT_LLAMA_FAILURE_JSON:" iterate_result.txt | tail -n +2 | sed -e '/^```/d' || true)
           if [ -z "$FAILURE_JSON" ]; then
-            FAILURE_JSON='{"stage": "unknown", "error": "claude_cli_error", "error_description": "claude -p exited non-zero or produced no parseable result", "details": "See workflow run logs for the raw output."}'
+            FAILURE_JSON='{"stage": "unknown", "error": "claude_cli_error", "error_description": "claude -p exited non-zero, or exited cleanly without ever emitting an ITERATE_FAT_LLAMA_DONE_JSON completion block (a stalled/incomplete run is not treated as success)", "details": "See workflow run logs for the raw output."}'
           fi
 
           STAGE=$(echo "$FAILURE_JSON" | jq -r '.stage // "unknown"')

@@ -73,4 +73,4 @@ Follow the "Remote actions" policy in `.claude/skills/rules/iterate-fat-llama.md
 3. Rename the local branch to the version-branch naming convention: `git branch -m v-<new_version>`.
 4. Push it: `git push -u origin v-<new_version>`.
 5. Open a PR against `main`: `gh pr create --base main --title "v-<new_version>" --body "<changelog entry>"`. If `gh` isn't installed or authenticated, push the branch anyway and give the user the compare link (`https://github.com/bkraad47/fat_llama/compare/main...v-<new_version>`) so they can open the PR by hand.
-6. Report the PR URL (or the compare link) as the final result.
+6. Report the PR URL (or the compare link) as the final result, and end with the `ITERATE_FAT_LLAMA_DONE_JSON:` block per the Success reporting contract in `.claude/skills/rules/iterate-fat-llama.md` — this is what proves the run actually reached here, not just exited cleanly.
