@@ -12,6 +12,7 @@ jobs:
   resolve:
     if: ${{ github.event.ref_type == 'branch' && github.actor == 'bkraad47' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     environment: Issue-Triage
     steps:
       - name: Guard — parse issue number
