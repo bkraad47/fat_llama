@@ -3,7 +3,7 @@ name: iterate-fat-llama
 description: End-to-end iterate-and-ship loop for fat_llama — refreshes the review-current-state factblock, runs test-fat-llama, and dispatches generate-code to fix what it finds, repeating up to 5 cycles or until audio quality is fully satisfactory; rolls back to whichever cycle scored best if none was fully satisfactory; then regenerates docs, bumps the version, and opens a PR for review. Use when asked to autonomously iterate on fat_llama's code/tests/audio quality and ship the result as a reviewable PR, not just check it once.
 allowed-tools: Bash, Skill, Agent
 disable-model-invocation: true
-model: haiku
+model: sonnet
 ---
 
 Before doing anything else, read `.claude/skills/rules/iterate-fat-llama.md` in full — it defines the cycle cap, score formula, naming conventions, version-bump policy, and remote-action confirmation requirement referenced throughout the steps below, and may be updated over time without this file changing. Also read `.claude/rules/scope-and-safety.md` for the filesystem write scope and safety boundaries every skill/agent follows, and `.claude/rules/project-mission.md` for what fat_llama actually is and how it works.
