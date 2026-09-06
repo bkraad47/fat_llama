@@ -135,12 +135,19 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_SECRET }}
           ITERATE_FAT_LLAMA_CI_MODE: "1"
           ITERATE_FAT_LLAMA_ISSUE_NUMBER: ${{ steps.guard.outputs.issue_number }}
+          # Background Skill/Agent dispatches (review-current-state, test-fat-llama,
+          # generate-code, ...) otherwise stop being waited on after Claude Code's default
+          # ~10-minute ceiling and return control anyway -- a real risk here since
+          # audio-quality-checker's local-fallback path alone is documented at ~20 minutes.
+          # 0 disables the ceiling so a dispatch is always waited out to its real completion.
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
         run: |
           CLEAN_STATEMENT="${{ steps.triage.outputs.clean_statement }}"
 
           set +e
           ITERATE_RAW=$(claude -p "/iterate-fat-llama $CLEAN_STATEMENT" \
             --dangerously-skip-permissions \
+            --permission-prompts none \
             --mcp-config /tmp/mcp-ci.json \
             --strict-mcp-config \
             --output-format json \
