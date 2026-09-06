@@ -1,0 +1,48 @@
+### [06:01:52 UTC] Step 0 — Setup
+Input: dispatch from test-fat-llama; branch iterate-fat-llama/20260906-044742, commit 5b98a5644e19f44703a51947485678649e41a8f8, no proposed_upscale_params.
+Action: created log file; read .claude/agents/rules/audio-quality.md and .claude/rules/scope-and-safety.md; checked git state, GPU availability (nvidia-smi absent; cupy 14.2.0 importable but no CUDA device), and remote branch head.
+Reasoning: need to know whether remote-GPU path is viable and whether the target commit is on origin before calling test_generate.
+Output: local HEAD == 5b98a56 (cycle 2 fix), NOT on origin (origin head = d31a6fe). No local GPU -> remote path is the only viable path. Working tree source/tests clean (only docs/CURRENT_STATE.md + .claude/log/* modified).
+
+### [06:02:30 UTC] Step 1 — read_audio/write_audio on a synthesized sample
+Input: pydub Sine(440Hz, 44100, stereo, 2s) exported to mp3 @192k; feed.read_audio/write_audio.
+Action: ran /tmp/aqc/step1_io.py: mp3 read -> flac write -> soundfile/mutagen inspection; wav write at 2x rate + read-back; silence and unsupported-format edge cases.
+Reasoning: verify container-level properties (sr, channels, duration, bitrate) and that write_audio's peak-normalization is lossless in shape.
+Output: mp3 read sr=44100 ch=2 dur=2000ms bitrate=191999, peak 31790 (raw PCM scale, float64). flac written PCM_24, sr/ch/duration preserved exactly (2.0000s), real bitrate 458.0 kbps (mutagen 457.7), roundtrip corr=1.000000 max abs err 5.96e-08, no NaN. wav write at 2x sr -> 88200 Hz PCM_24, read back consistent (4233.6 kbps). Silence writes without div-by-zero; target_format='ogg' correctly raises ValueError. PASS.
+
+### [06:02:50 UTC] Step 6a — remote GPU job dispatched
+Input: branch iterate-fat-llama/20260906-044742 @ 5b98a56 (pushed to origin first), baseline params (max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, all toggles True, mp3->flac).
+Action: git push origin HEAD; mcp__fllm-mcp-server__test_generate.
+Reasoning: no CUDA device locally (nvidia-smi absent), so remote path is required per rules step 1 before any local fallback.
+Output: job_id 3fce0083baa241588d84c1c0d960f03e, status queued -> running (instance created, worker bootstrapping).
+
+### [06:05:00 UTC] Step 2/3 — test coherence review + assertion strengthening
+Input: fat_llama/tests/test_feed.py (1032 lines, 15 tests).
+Action: read all 15 tests; ran the three cycle-2 tests (test_upscale_end_to_end_with_adaptive_filter_enabled, test_lms_filter_block_size_one_matches_reference_per_sample_update, test_lms_filter_block_size_bounds_sequential_iterations) via /tmp/aqc/run_gpu_tests_numpy_shim.py (numpy stand-in for cupy, GPU_AVAILABLE forced True). Added container-level assertions (sample rate == 44100 * compute_upscale_factor(...), <= MAX_REALISTIC_SAMPLE_RATE_HZ, duration ~= 1.0s) to test_upscale_end_to_end_with_adaptive_filter_enabled.
+Reasoning: the cycle-2 e2e adaptive-filter test asserted sample values (finite/RMS/clipping/dominant freq) but nothing about sample rate or duration, so a length- or rate-changing regression in the LMS stage would have gone uncaught; that is a pure assertion strengthening within scope.
+Output: all 3 tests OK under the shim (1.2s); strengthened test still OK. NOTE: the remote GPU job runs upscale() only, never the unittest suite, so the @requires_gpu tests remain unverified on real CUDA (they skip locally: no CUDA device). Also found: running a script from outside the repo root picks up the installed fat_llama 1.4.0 from site-packages instead of the working tree -- PYTHONPATH must point at the repo.
+
+### [06:05:20 UTC] Step 6 — remote GPU baseline run completed
+Input: job 3fce0083baa241588d84c1c0d960f03e.
+Action: polled get_test_generate_status to terminal state; downloaded output_signed_url artifact to /tmp/aqc/remote_output_test.flac and md5-compared with the repo-root output_test.flac.
+Reasoning: push_status was "not_attempted" with an empty result_commit_sha, so no new commit to fetch -- needed to confirm the repo copy is the artifact this run produced.
+Output: status=succeeded in ~2m43s wall (created 06:02:30 -> done 06:05:13); worker log: "Upscale factor set to: 4", stereo, final Nyquist cutoff at 22050.0 Hz. md5 e4b431e4432608925ce5d1616df65a3a identical to repo-root output_test.flac => deterministic, nothing new to commit (push_status not_attempted is correct, not a failure). Remote path used; no local fallback needed.
+
+### [06:07:00 UTC] Step 4/5 — audio property + spectral analysis
+Input: input_test.mp3 (44100 Hz, 2ch, 192 kbps, 15.177 s), input_test.flac reference (308700 Hz, PCM_24, 15.1373 s), output_test.flac (176400 Hz, PCM_24, 15.1373 s, 1860.4 kbps real).
+Action: /tmp/aqc/analyze.py (properties, clipping, dropouts, discontinuities, above-Nyquist, STFT spectral deviation, band energies), /tmp/aqc/detail.py (mp3 vs ref vs out band energies at a common 44.1 kHz), /tmp/aqc/harm.py (projection onto sin(linspace(0,2pi,N))), /tmp/aqc/diag.py (score decomposition).
+Reasoning: separate genuine added detail from artifacts and identify what drives the remaining spectral deviation.
+Output: sr 176400 = 4x44100 (<=192 kHz ceiling), duration matches reference exactly, no NaN/Inf, clipping 5.34e-05 (reference itself 2.29e-04), zero dropouts >50ms, 99.9th-pct |diff| 0.269x reference, above-original-Nyquist peak -147.9 dB / energy -140.8 dB (reference's own legacy band sits at -57.2 dB). Spectral deviation: convergence 0.8165, correlation 0.9830 -> 9.0. Added detail: output band energies match the mp3 source within 0.0-0.3 dB from 0-19 kHz and are 0.3-4.2 dB BELOW it above 19 kHz -> spectrally transparent, no added detail, no broadband noise rise (quietest-5% and median frame energy identical to reference). FINDING: output carries a 0.066 Hz (one cycle / 15.14 s) sine at 4.87% FS (-26.2 dBFS) in both channels, absent from the reference (0.01%); it is IST's harmonic-reconstruction term, costs 2.6% of peak headroom, and accounts for the entire spectral-deviation gap (removing it raises convergence 0.8165->0.9839, correlation 0.9830->0.9999, score 9.0->9.9).
+
+### [06:08:30 UTC] Step 7 — spectrogram comparison image
+Input: input_test.mp3 / input_test.flac / output_test.flac.
+Action: /tmp/aqc/make_spectrogram.py using analysis.py's read_mp3/read_flac/normalize and scipy.signal.spectrogram(nperseg=2048); 3 stacked panels, shared x, vmin=-120/vmax=0, data masked (not just axis-limited) above the mp3's own 22050 Hz Nyquist; saved to docs/images/spectrogram_comparison.png.
+Reasoning: per rules' image section; the reference's own above-Nyquist legacy artifacts must not be displayed.
+Output: docs/images/spectrogram_comparison.png (507 KB) written; visually inspected -- reference and output panels track each other closely across the whole band.
+
+### [06:09:30 UTC] Step 8 — report
+Input: all measurements above.
+Action: assembled the JSON output contract (11 test entries, scores, upscale_params_used=baseline, spectrogram_image, log).
+Reasoning: two entries are reported as failures -- "no measurable added detail" and the subsonic IST harmonic injection -- because both are actionable production-code findings for generate-code, not test defects.
+Output: coherence 8.0 (clean on every artifact check incl. above-Nyquist, but transparent + subsonic injection), spectral_deviation 9.0 (convergence 0.8165, correlation 0.9830).
+### [06:09:35 UTC] DONE — Remote GPU baseline run succeeded (~2m43s); issue #20 symptoms confirmed fixed (176400 Hz, 1860.4 kbps, adaptive filter enabled end-to-end); coherence 8.0, spectral deviation 9.0; one test assertion strengthened; new finding: IST injects a 0.066 Hz -26.2 dBFS sine that accounts for the whole spectral-deviation gap.

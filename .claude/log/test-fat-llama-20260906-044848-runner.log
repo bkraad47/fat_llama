@@ -1,0 +1,19 @@
+### [04:48:48 UTC] Step 1 — dispatch code-tester-reviewer
+Input: cycle 1 of iterate-fat-llama run for issue #20; candidate C_0, branch iterate-fat-llama/20260906-044742 @ 865d21b3f052995b1c76546befffcedf8b6242ef.
+Action: dispatched code-tester-reviewer (subagent_type: code-tester-reviewer, run_in_background: false), in parallel with audio-quality-checker below.
+Reasoning: no shared-file race since code-tester-reviewer is read-only; parallel dispatch per rules file.
+Output: {"tests": [{"name": "test_read_audio", "type": "code", "status": "pass", "failure_reason": null}, {"name": "test_write_audio", "type": "code", "status": "pass", "failure_reason": null}], "quality": [], "log": ".claude/log/code-tester-reviewer-20260906-044902-runner.log"}. Only 2 of the suite's tests ran locally (no local GPU); the other 8 are GPU-gated (requires_gpu) and skip cleanly per test_feed.py's own design -- not a failure.
+
+### [04:48:48 UTC] Step 2 — dispatch audio-quality-checker
+Input: same candidate/branch/commit as above; no proposed_upscale_params for this cycle (first assessment) so instructed to use its fixed baseline config.
+Action: dispatched audio-quality-checker (subagent_type: audio-quality-checker, run_in_background: false) in parallel with code-tester-reviewer above.
+Reasoning: baseline coherence/spectral-deviation run needed to score C_0 against DIRECTIVES (unrealistic bitrate/sample-rate, adaptive-filter runtime).
+Output: used remote-GPU path (fllm-mcp-server) after pushing commit 865d21b to origin (branch wasn't there yet); job 5782cbdbba68419080e0d902bbd4a833 succeeded, pushed result commit 008ff81c9e1672929695bb91449c4953d62cacbc back onto the branch; local tree reset --hard to that commit to receive output_test.flac (local GPU was unusable anyway: cudaErrorInsufficientDriver, no nvidia-smi). 16 audio_quality tests: 11 pass, 5 fail (test_feed_local_suite_coverage [environmental, GPU absent locally], test_output_sample_rate_is_realistic, test_output_bitrate_is_realistic, test_pipeline_runtime_is_practical, test_reference_input_flac_is_clean_above_nyquist [legacy reference-asset artifact, not fixable via generate-code]) -- the three bolded failures reproduce issue #20 directly (308700 Hz / 2390.4 kbps output at target_bitrate_kbps=1400, and a 27.5-minute baseline run with toggle_adaptive_filter=True on a 15.2s source). scores: coherence 9.0, spectral_deviation 9.0. Full JSON in .claude/log/audio-quality-checker-20260906-044905-runner.log.
+
+### [05:17:xx UTC] Step 3-4 — merge and update README
+Input: both subagents' JSON reports above.
+Action: merged tests (2 code + 16 audio_quality = 18 entries) and quality ([] from code-tester-reviewer) into one "tests"/"quality" pair per the score formula iterate-fat-llama.md's SKILL.md actually consumes (test-fat-llama.md's own contract sample mislabels the "quality" key as audio-quality-checker's entries, which would leave code-tester-reviewer's PEP8 "quality" list with nowhere to go and breaks iterate-fat-llama step (b)'s "type": "audio_quality" filter over a single merged "tests" list -- resolved in favor of the internally-consistent reading). Updated README.md's Audio Quality Scores block (coherence/spectral_deviation rows + rationale) verbatim from audio-quality-checker's scores; left the Spectrogram Results image line unchanged (already pointed at docs/images/spectrogram_comparison.png).
+Reasoning: README update contract requires both scores and spectrogram_image present, which they are.
+Output: README.md updated (Audio Quality Scores block only).
+
+### [05:17:xx UTC] DONE — merged JSON assembled: 18 tests (2 code pass, 16 audio_quality: 11 pass/5 fail), 0 quality findings, coherence 9.0, spectral_deviation 9.0. README.md scores section updated.

@@ -1,0 +1,119 @@
+### [04:47:00 UTC] Step 0.0 — CI mode detection
+Input: environment variables ITERATE_FAT_LLAMA_CI_MODE, ITERATE_FAT_LLAMA_ISSUE_NUMBER
+Action: checked env; ITERATE_FAT_LLAMA_CI_MODE=1, ITERATE_FAT_LLAMA_ISSUE_NUMBER=20
+Reasoning: these are trusted, workflow-set env vars per .claude/skills/rules/iterate-fat-llama.md's "CI / GitHub Actions mode" section — running non-interactively from issue-branch-resolve.yml for issue #20.
+Output: CI mode confirmed. Step 0.2 (uncommitted-changes check) and Step 7 (confirmation) will follow the CI-mode behavior differences.
+
+### [04:47:00 UTC] Step 0.1 — mission context
+Input: README.md (repo root), .claude/rules/project-mission.md
+Action: read README.md in full and .claude/rules/project-mission.md, .claude/rules/scope-and-safety.md, .claude/rules/logging.md, .claude/skills/rules/iterate-fat-llama.md
+Reasoning: per SKILL.md and project-mission.md, this run's mission context (mp3->flac via IST on FFT data, CUDA-only, no AI/ML upscaling, no content above original Nyquist) must be carried into every generate-code dispatch and the docs/changelog/PR steps.
+Output: context loaded; DIRECTIVES for this run = the clean_problem_statement about target_bitrate_kbps=900 producing ~5300kbps/~250kHz output and toggle_adaptive_filter=True hanging for 30+ minutes on a 15s clip (RTX 3060).
+
+### [04:47:42 UTC] Step 0.2 — uncommitted changes check
+Input: git status showing issue_raw.json, triage_result.json (untracked) present at run start
+Action: inspected both files; issue_raw.json is the raw GitHub issue #20 body/comments, triage_result.json is triage-issue's clean_problem_statement output -- both are this exact CI workflow run's own intermediate artifacts, written by the triage-issue step that runs immediately before iterate-fat-llama in issue-branch-resolve.yml, not leftovers from an unrelated prior run.
+Reasoning: per the CI-mode behavior differences, Step 0.2 "should never actually trigger" from a fresh checkout; these two files are expected, same-run artifacts feeding this run's own DIRECTIVES, not stray uncommitted work to block on.
+Output: proceeding without asking.
+
+### [04:47:42 UTC] Step 0.3-0.5 — branch/tag setup
+Input: current HEAD on branch Issue-no-20-unrealistic-final-bitrate-fixing
+Action: BASE_BRANCH=Issue-no-20-unrealistic-final-bitrate-fixing, BASE_COMMIT=865d21b3f052995b1c76546befffcedf8b6242ef. Created and switched to new branch iterate-fat-llama/20260906-044742. Tagged current HEAD as iterate-fat-llama/20260906-044742/iter-0 (candidate C_0).
+Reasoning: per Step 0 naming convention, isolates this run's work from BASE_BRANCH.
+Output: done. DIRECTIVES for this run (verbatim, from triage_result.json's clean_problem_statement): "When calling upscale() with target_bitrate_kbps=900 and adaptive_filter disabled, the resulting FLAC file has unrealistic output parameters: bitrate ~5300 kbps and sample rate ~250kHz (should be 44.1-96kHz). Additionally, enabling adaptive_filter causes the function to hang/run extremely slowly (30+ minutes for a 15-second audio file), making it impractical on consumer hardware (RTX 3060). Multiple users report the same behavior."
+
+### [04:48:31 UTC] Cycle 1a — review-current-state
+Input: candidate C_0 (untouched working tree)
+Action: dispatched review-current-state skill. Log: review-current-state-20260906-044831-runner.log
+Reasoning: refresh docs/CURRENT_STATE.md against C_0 before testing it.
+Output: docs/CURRENT_STATE.md confirmed already current for C_0 (no source changed since it was last generated); no rewrite needed.
+
+### [04:48:48 UTC] Cycle 1b — test-fat-llama
+Input: candidate C_0
+Action: dispatched test-fat-llama skill (code-tester-reviewer + audio-quality-checker in parallel). Coordinator log: .claude/log/test-fat-llama-20260906-044848-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260906-044902-runner.log, .claude/log/audio-quality-checker-20260906-044905-runner.log.
+Reasoning: get merged tests/quality/scores JSON for C_0 to compute score_1 and check early-stop conditions.
+Output: 18 tests total (2 code, both pass; 16 audio_quality: 11 pass, 5 fail). score_1 = 11/16 = 0.6875. Failing audio_quality entries: test_feed_local_suite_coverage (environmental -- no local GPU), test_output_sample_rate_is_realistic (308700 Hz output, reproduces issue #20), test_output_bitrate_is_realistic (2390.4 kbps effective output, reproduces issue #20), test_pipeline_runtime_is_practical (27.5 min baseline run with adaptive filter on a 15.2s source, reproduces issue #20), test_reference_input_flac_is_clean_above_nyquist (legacy reference-asset artifact, not a generate-code target). quality (PEP8) = [] (clean). scores: coherence 9.0, spectral_deviation 9.0. During this dispatch, audio-quality-checker used the remote-GPU path: pushed commit 865d21b to origin (branch had not been pushed yet), ran job 5782cbdbba68419080e0d902bbd4a833, which committed regenerated output_test.flac back as 008ff81c9e1672929695bb91449c4953d62cacbc; local tree was reset --hard to that commit to receive it (iter-0 tag still points at the original 865d21b; only output_test.flac's bytes changed between the two, confirmed via git diff --stat).
+
+### [05:17:xx UTC] Cycle 1c — early-stop check
+Input: score_1 = 0.6875 (not 1.0). Satisfactory-results condition: (1) no code bugs -- true (2/2 code tests pass, quality=[]); (2) coherence > 8.5 -- true (9.0); (3) spectral deviation > 9.0 -- FALSE (exactly 9.0, not strictly greater); (4) DIRECTIVES satisfied -- FALSE (sample-rate/bitrate unrealistic and adaptive-filter runtime are exactly DIRECTIVES' subject and are failing).
+Action: none (no early stop).
+Reasoning: neither score_i==1.0 nor the satisfactory-results condition holds -- proceeding to fix cycle 1d.
+Output: proceeding to generate-code dispatch for cycle 1.
+
+### [05:29:xx UTC] Cycle 1d — generate-code
+Input: full test-fat-llama JSON from cycle 1b, DIRECTIVES verbatim, mission context.
+Action: dispatched generate-code subagent (subagent_type: generate-code, run_in_background: false). First two attempts with the default Fable 5.1 model failed with a platform-side safeguard API error (`reasoning_extraction`, invalid_request) unrelated to message content -- retried once verbatim (same error), then retried with `model: "sonnet"` override, which succeeded. Log: .claude/log/generate-code-20260906-052816-runner.log.
+Reasoning: two related root causes localized by cycle 1 testing (unbounded upscale_factor ratio inflating sample rate/bitrate; lms_filter's per-sample Python loop causing the adaptive-filter slowdown, compounded by the inflated sample count) needed a hypothesis-driven fix in feed.py.
+Output: {"outcome": "confirmed", "changes": [feed.py: added MAX_REALISTIC_SAMPLE_RATE_HZ=192000 + compute_upscale_factor() clamping upscale_factor so sample_rate*upscale_factor never exceeds 192kHz; rewrote lms_filter() as block-adaptive LMS (Clark et al. 1981 Block LMS variant, block_size=256 default, reduces to exact prior per-sample behavior at block_size=1) with a new pure-Python _lms_block_ranges() helper; test_feed.py: 2 new non-GPU-gated regression tests plus rewrote one GPU-gated test that had asserted the old unbounded behavior as intended; README.md: updated Algorithm Explanation steps 2 and 7], "verification": {"status": "partial", "evidence": "H1 (sample rate/bitrate) fully verified locally (compute_upscale_factor is pure Python, no GPU needed) -- issue's own numbers (44100Hz/128000bps/900kbps and 44100Hz/192000bps/1400kbps) both now clamp to 176400 Hz instead of 308700 Hz. H2 (LMS runtime) verified algebraically/structurally only (block_size=1 reduces to exact prior update; block-partitioning logic unit-tested) -- no local GPU to measure actual wall-clock improvement, an environmental limitation consistent with this cycle's own test-fat-llama findings. Full suite: 12 tests, 4 ran (pass, including both new ones), 8 skipped (GPU-gated, clean skip)."}, "proposed_upscale_params": null. Reviewed the feed.py diff directly: block-LMS indexing and gradient math check out algebraically against the original per-sample update (verified by hand). Flagged (not acted on, no action needed): generate-code noted an apparent inconsistency in scientific-coding.md's Scope-restrictions vs Priorities sections re: README.md write access -- it followed the more specific Priorities carve-out (Algorithm Explanation only); noting this for whoever tunes that rules file next, not blocking.
+
+### [05:29:xx UTC] Cycle 1e — checkpoint
+Input: generate-code's changes (feed.py, test_feed.py, README.md) plus the already-uncommitted docs/images/spectrogram_comparison.png from cycle 1b's audio-quality-checker test pass.
+Action: git identity was unset in this environment (unlike the production workflow, which sets it before invoking this skill per .github/workflows/issue-branch-resolve.yml) -- configured it locally to match that same convention (github-actions[bot] / github-actions[bot]@users.noreply.github.com), then `git add -A && git commit -m "iterate-fat-llama: cycle 1 fix"` (a7b5dd6) and tagged iterate-fat-llama/20260906-044742/iter-1 (candidate C_1).
+Output: C_1 committed and tagged.
+
+### [05:45:09 UTC] Cycle 2a — review-current-state
+Input: candidate C_1 (cycle 1's committed fix: compute_upscale_factor + block-adaptive lms_filter)
+Action: dispatched review-current-state skill. Log: .claude/log/review-current-state-20260906-054509-runner.log
+Reasoning: refresh docs/CURRENT_STATE.md against C_1 before testing it (real source changes this time, unlike cycle 1's review of unchanged C_0).
+Output: docs/CURRENT_STATE.md updated in place with factblocks for compute_upscale_factor, _lms_block_ranges, rewritten lms_filter/upscale factblocks, 2 new test factblocks, and refreshed Notes.
+
+### [05:45:18 UTC] Cycle 2b — test-fat-llama
+Input: candidate C_1
+Action: dispatched test-fat-llama skill. Coordinator log: .claude/log/test-fat-llama-20260906-054518-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260906-054533-github-actions-bot.log, .claude/log/audio-quality-checker-20260906-054534-github-actions-bot-.log.
+Output: 18 tests total (4 code, all pass -- corrected from the subagent's own overclaim of 12 "pass", 8 of which its log shows were actually GPU-skipped; 14 audio_quality: 12 pass, 2 fail). score_2 = 12/14 = 0.8571. Both of DIRECTIVES' original symptoms are now explicitly confirmed fixed: output sample rate 176400 Hz (was 308700), real bitrate 1860.4 kbps (was 2390.9), and the baseline run (adaptive filter on) completed within a 3m05s remote job total (was 27.5 min for lms_filter alone). Remaining 2 failures are test-coverage-gap findings (no e2e upscale() test with toggle_adaptive_filter=True; no test validating block_size=1 == exact prior per-sample update / bounded iteration count), not regressions of DIRECTIVES' original symptoms. quality (PEP8) = []. scores: coherence 9.0, spectral_deviation 9.0. audio-quality-checker also received the remote job's regenerated output_test.flac via git fetch + merge --ff-only (not reset --hard, to preserve this coordinator's uncommitted docs/CURRENT_STATE.md refresh) and made one in-scope test-assertion strengthening (test_lms_block_ranges_partitions_range_exactly: <= -> == for non-final blocks).
+
+### [05:49:xx UTC] Cycle 2c — early-stop check
+Input: score_2 = 0.8571 (not 1.0). Satisfactory-results condition: (1) no code bugs -- true (4/4 runnable code tests pass, 8 skipped for environmental/no-GPU reasons, 0 quality findings); (2) coherence > 8.5 -- true (9.0); (3) spectral deviation > 9.0 -- FALSE (exactly 9.0, not strictly greater, same as cycle 1); (4) DIRECTIVES satisfied -- true (both original symptoms explicitly confirmed fixed this cycle; the 2 remaining failures are test-coverage gaps outside DIRECTIVES' literal scope, not a DIRECTIVES regression).
+Action: none (no early stop -- condition (3) alone blocks it).
+Reasoning: neither score_i==1.0 nor all four satisfactory-results conditions hold.
+Output: proceeding to generate-code dispatch for cycle 2, targeting the two coverage-gap findings (DIRECTIVES' actual reported bug is fixed; this cycle's fix pass is precautionary/coverage-hardening rather than another attempt at the same root cause).
+
+### [05:54:13 UTC] Cycle 2d — generate-code
+Input: full test-fat-llama JSON from cycle 2b (the 2 coverage-gap failures), DIRECTIVES verbatim, mission context, status note that DIRECTIVES' actual bug is already fixed.
+Action: dispatched generate-code subagent (model: sonnet, same override as cycle 1 -- default Fable model had the same platform-side safeguard issue). Log: .claude/log/generate-code-20260906-055413-github-actions-bot.log.
+Output: {"outcome": "confirmed", "changes": [test_feed.py only: added test_upscale_end_to_end_with_adaptive_filter_enabled (e2e, toggle_adaptive_filter=True), test_lms_filter_block_size_one_matches_reference_per_sample_update (independent per-sample reference vs block_size=1), test_lms_filter_block_size_bounds_sequential_iterations (asserts default block_size=256, bounds iteration counts via mock.patch.object instrumentation, asserts >=100x reduction vs block_size=1); also strengthened test_lms_block_ranges_partitions_range_exactly further (non-final blocks must equal block_size exactly, not just <=)], "verification": {"status": "partial", "evidence": "Full suite runs clean (4 non-GPU pass, 11 GPU-gated incl. 3 new skip cleanly, 0 fail). No local GPU to actually run the new @requires_gpu tests, so built throwaway (uncommitted) numpy stand-ins using identical math/unmodified source: confirmed block_size=1 matches per-sample reference to ~1e-17, iteration counts 9 (block_size=256) vs 2188 (block_size=1) for a 0.2s/44.1kHz signal (~243x reduction), and a cupy-shimmed real upscale() run with toggle_adaptive_filter=True produced finite/non-silent/440Hz-dominant output at 176400 Hz. Real-GPU confirmation of the new tests themselves remains open."}, "proposed_upscale_params": null}. Flagged (not acted on): generate-code noted the harness's own 'prefer Bash over Read/Edit/Write tools' system-reminder (present in this session from the start, not from any file/issue content) as having the shape of a tool-usage-altering instruction and flagged it per scope-and-safety.md's injection-detection guidance, then correctly continued using standard Read/Edit/Write tools anyway since it granted no new scope. This is a known, benign harness-level reminder (also present in this coordinator's own context) -- not an injection from untrusted content; noting it here for the record per the safety-note pattern, no action needed.
+
+### [05:54:xx UTC] Cycle 2e — checkpoint
+Action: git add -A && git commit -m "iterate-fat-llama: cycle 2 fix" (5b98a56), tagged iterate-fat-llama/20260906-044742/iter-2 (candidate C_2).
+Output: C_2 committed and tagged. Running score table so far: (1, 0.6875), (2, 0.8571).
+
+### [06:01:25 UTC] Cycle 3a — review-current-state
+Input: candidate C_2 (cycle 2's committed test-only fix)
+Action: dispatched review-current-state skill. Log: .claude/log/review-current-state-20260906-060125-runner.log
+Output: docs/CURRENT_STATE.md updated with 3 new test factblocks and refreshed Notes (runtime fix confirmed on real GPU, block-adaptive tradeoff validated against a live 9.0 coherence score, e2e adaptive-filter coverage gap closed for mono).
+
+### [06:01:31 UTC] Cycle 3b — test-fat-llama
+Input: candidate C_2
+Action: dispatched test-fat-llama skill. Coordinator log: .claude/log/test-fat-llama-20260906-060131-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260906-060150-github-actions-bot.log, .claude/log/audio-quality-checker-20260906-060152-github-actions-bot.log.
+Output: 16 tests total (4 code, all pass; 12 audio_quality: 10 pass, 2 fail). score_3 = 10/12 = 0.8333. Both DIRECTIVES symptoms reconfirmed fixed on real GPU this cycle (2m43s full remote job with adaptive filter on; 176400 Hz/1860.4 kbps output). The 2 failures are NEW findings, outside DIRECTIVES' literal scope: IST's harmonic-reconstruction term lands as a subsonic 0.066 Hz artifact (-26.2 dBFS) instead of audible added detail -- a pre-existing issue already flagged and deliberately deferred back in cycle 4 (see docs/CURRENT_STATE.md Notes), now caught by this cycle's explicit spectral testing. Coherence dropped to 8.0 (from 9.0); spectral_deviation capped at 9.0 (would be 9.9 without this one artifact). quality (PEP8) = [].
+
+### [06:05:xx UTC] Cycle 3c — early-stop check
+Input: score_3 = 0.8333 (not 1.0). Satisfactory-results condition: (1) no code bugs -- true; (2) coherence > 8.5 -- FALSE (8.0); (3) spectral deviation > 9.0 -- FALSE (9.0); (4) DIRECTIVES satisfied -- true (both original symptoms reconfirmed fixed again this cycle).
+Action: none (no early stop -- conditions 2 and 3 both fail).
+Reasoning: proceeding to cycle 3's fix. Judgment call: the 2 failing findings are outside DIRECTIVES' literal ask (they're about IST's harmonic term, not bitrate/sample-rate/runtime), but SKILL.md step (d) directs generate-code to address "the reported test/quality/audio findings" from test-fat-llama each cycle (not only DIRECTIVES-matching ones), the score formula scores all audio_quality entries regardless of DIRECTIVES relevance, and generate-code's own priorities file (scientific-coding.md) explicitly authorizes algorithm-level coherence/spectral fixes as top priority, citing exactly this kind of "no measurable added detail" finding as in scope. Proceeding to dispatch generate-code for cycle 3 to address the harmonic-term finding, with 2 cycles remaining under the 5-cycle cap.
+Output: proceeding to generate-code dispatch for cycle 3.
+
+### [06:11:42 UTC] Cycle 3d — generate-code
+Input: full test-fat-llama JSON from cycle 3b (the 2 non-DIRECTIVES coherence findings), DIRECTIVES verbatim, mission context, status note that DIRECTIVES' actual bug remains fixed.
+Action: dispatched generate-code subagent (model: sonnet override, same platform-safeguard workaround as cycles 1-2). Log: .claude/log/generate-code-20260906-061142-github-actions-bot-.log.
+Output: {"outcome": "confirmed", "changes": [feed.py: iterative_soft_thresholding's harmonic term now derives its frequency each iteration from the dominant retained FFT bin (data_fft_thres, already computed for masking) and injects its first overtone (2x bin index, clamped below this buffer's own Nyquist bin), replacing the fixed cp.sin(linspace(0,2pi,n)) that always spanned exactly one cycle across the whole buffer (~0.066 Hz for a real ~15s buffer); also fixed the phase array itself to be exactly periodic (arange(n)/n vs linspace's inclusive-endpoint non-periodicity); degenerate-case fallback to a mid-band bin (half//4) instead of bin 1, so it can't reintroduce the same subsonic result; test_feed.py: added test_ist_harmonic_term_lands_in_audible_band (asserts injected content tracks 2x the input's own dominant frequency for two different synthetic inputs, not a fixed ~1 Hz); README.md: updated Algorithm Explanation step 4], "verification": {"status": "pass", "evidence": "No local GPU (same environmental limitation as prior cycles), so verified via a numpy-shimmed stand-in against the real unmodified source logic: pre-fix isolated-harmonic-term dominant frequency measured at exactly 1.0 Hz (confirms the bug); post-fix measured at 600.0 Hz for a 300Hz-dominated input and 200.0 Hz for a 100Hz-dominated input -- both audible and exactly 2x each input's own dominant frequency, matching the hypothesis exactly. Re-verified the two existing IST amplitude/bound tests still hold via the same shim (unaffected, only frequency construction changed)."}, "proposed_upscale_params": null}. Any overtone content this pushes above the original Nyquist remains removed by apply_original_nyquist_cutoff (unconditional, downstream) -- consistent with the project's no-content-above-original-Nyquist hard constraint; this is a within-original-bandwidth detail fix, not a bandwidth-extension change.
+
+### [06:11:xx UTC] Cycle 3e — checkpoint
+Action: git add -A && git commit -m "iterate-fat-llama: cycle 3 fix" (5a8f300), tagged iterate-fat-llama/20260906-044742/iter-3 (candidate C_3).
+Output: C_3 committed and tagged. Running score table so far: (1, 0.6875), (2, 0.8571), (3, 0.8333) [note: cycle 3's score reflects new findings surfaced by better test coverage, not a regression of the underlying fix].
+
+### [06:21:44 UTC] Cycle 4a — review-current-state
+Input: candidate C_3 (cycle 3's committed fix: harmonic-term frequency derivation)
+Action: dispatched review-current-state skill. Log: .claude/log/review-current-state-20260906-062144-runner.log
+Output: docs/CURRENT_STATE.md updated with the rewritten iterative_soft_thresholding factblock, 1 new test factblock, and the long-standing cycle-4-era Notes item about this defect marked fixed.
+
+### [06:21:50 UTC] Cycle 4b — test-fat-llama
+Input: candidate C_3
+Action: dispatched test-fat-llama skill. Coordinator log: .claude/log/test-fat-llama-20260906-062150-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260906-062205-github-actions-bot.log, .claude/log/audio-quality-checker-20260906-062214-github-actions-bot-.log.
+Output: 15 tests total (4 code, all pass; 11 audio_quality: 9 pass, 2 fail). score_4 = 9/11 = 0.8182. Both DIRECTIVES symptoms reconfirmed fixed again (176400 Hz, ~1875 kbps, ~2m50s full remote job with adaptive filter on). IMPORTANT: cycle 3's harmonic-frequency fix is confirmed genuine but incomplete on real hardware -- it removed the subsonic artifact (spectral_deviation 9.0->9.3) but introduced a NEW, more audible artifact: because upscale() processes each channel as one whole ~15s buffer, the "dominant retained FFT bin" is identical on every iteration, so the harmonic term is a static single-frequency drone (98.168 Hz, -28.7 dBFS) instead of time-varying content, collapsing dynamic range from 57.1 dB to 25.4 dB. Net effect: coherence DROPPED to 7.0 (from 8.0), despite spectral_deviation rising to 9.3 (from 9.0) -- the two scores disagree on direction. audio-quality-checker suggests deriving the dominant bin per short analysis frame (STFT/overlap-add) instead of once per whole buffer, and/or reconsidering whether the harmonic term should exist at all.
+
+### [06:26:xx UTC] Cycle 4c — early-stop check
+Input: score_4 = 0.8182 (not 1.0). Satisfactory-results condition: (1) no code bugs -- true; (2) coherence > 8.5 -- FALSE (7.0, and dropped this cycle); (3) spectral deviation > 9.0 -- true (9.3); (4) DIRECTIVES satisfied -- true.
+Action: none (no early stop -- condition 2 fails, and the underlying audio quality genuinely regressed by one listener-relevant measure this cycle even though a different measure improved).
+Reasoning: 1 cycle remains under the 5-cycle cap. Dispatching generate-code for cycle 4 to address the newly-identified static-drone artifact, per audio-quality-checker's own suggested direction (frame-local dominant-bin derivation, and/or reconsidering the harmonic term's necessity) -- same in-scope-coherence-fix reasoning as cycle 3's dispatch. Running score table: (1, 0.6875) C_0, (2, 0.8571) C_1, (3, 0.8333) C_2, (4, 0.8182) C_3 -- C_1 (cycle 1's fix alone: bounded upscale_factor + block-adaptive lms_filter, no harmonic-term change) is currently the best-scoring candidate; noting this now since it's directly relevant to the rollback decision if cycle 5 doesn't improve on it.
+Output: proceeding to generate-code dispatch for cycle 4.

@@ -1,13 +1,19 @@
+import inspect
+import math
 import os
 import unittest
+from unittest import mock
 
 import cupy as cp
 import numpy as np
 import soundfile as sf
 
+from fat_llama.audio_fattener import feed as feed_module
 from fat_llama.audio_fattener.feed import (
-    apply_original_nyquist_cutoff, iterative_soft_thresholding, lms_filter,
-    new_interpolation_algorithm, read_audio, upscale, write_audio
+    MAX_REALISTIC_SAMPLE_RATE_HZ, _lms_block_ranges,
+    apply_original_nyquist_cutoff, compute_upscale_factor,
+    iterative_soft_thresholding, lms_filter, new_interpolation_algorithm,
+    read_audio, upscale, write_audio
 )
 
 
@@ -161,6 +167,107 @@ class TestAudioFattener(unittest.TestCase):
             if os.path.exists(output_file):
                 os.remove(output_file)
 
+    def test_compute_upscale_factor_bounds_realistic_sample_rate(self):
+        # Regression test for issue #20: upscale() with target_bitrate_kbps
+        # values well within their documented valid range (800-1411 for
+        # flac, 800-6444 for wav) against a typical compressed mp3 source
+        # bitrate (128-192 kbps) used to derive an unbounded ratio
+        # (round(target_bitrate_kbps * 1000 / source_bitrate)) that
+        # regularly landed at 5-7+, driving output sample rates past
+        # 250-300 kHz -- far outside any realistic playback/DAC rate.
+        # compute_upscale_factor is pure Python (no CuPy/CUDA dependency),
+        # so this exercises the actual shipped fix directly, without
+        # needing a GPU.
+        sample_rate = 44100
+
+        # The issue's own reported scenario: target_bitrate_kbps=900 (and
+        # a nearby 1400) against typical compressed mp3 bitrates. The old
+        # formula (round(900_000 / 128_000) = 7, round(1_400_000 /
+        # 192_000) = 7) drove sample_rate * 7 = 308700 Hz.
+        for source_bitrate_bps, target_bitrate_kbps in (
+            (128000, 900), (192000, 1400), (64000, 800), (320000, 1411),
+        ):
+            factor = compute_upscale_factor(
+                sample_rate, source_bitrate_bps, target_bitrate_kbps
+            )
+            new_sample_rate = sample_rate * factor
+            self.assertGreaterEqual(
+                factor, 1,
+                "compute_upscale_factor must never derive a downscale "
+                f"(factor={factor} for source_bitrate={source_bitrate_bps}"
+                f", target_bitrate_kbps={target_bitrate_kbps})."
+            )
+            self.assertLessEqual(
+                new_sample_rate, MAX_REALISTIC_SAMPLE_RATE_HZ,
+                f"compute_upscale_factor produced an unrealistic sample "
+                f"rate ({new_sample_rate} Hz) for source_bitrate="
+                f"{source_bitrate_bps}, target_bitrate_kbps="
+                f"{target_bitrate_kbps}; this reproduces issue #20's "
+                "unrealistic sample rate/bitrate report."
+            )
+
+        # Unknown source bitrate falls back to a small, bounded factor
+        # rather than raising or defaulting to something unbounded.
+        fallback_factor = compute_upscale_factor(sample_rate, None, 1400)
+        self.assertGreaterEqual(fallback_factor, 1)
+        self.assertLessEqual(
+            sample_rate * fallback_factor, MAX_REALISTIC_SAMPLE_RATE_HZ
+        )
+
+        # An already-high-bitrate source (e.g. a lossless/high-bitrate
+        # input) must clamp to a factor of 1 (no downscale), not derive a
+        # fractional/zero factor.
+        self.assertEqual(
+            compute_upscale_factor(sample_rate, 1300000, 800), 1
+        )
+
+        # A source sample rate already at or above the realistic ceiling
+        # must not be upscaled further.
+        self.assertEqual(
+            compute_upscale_factor(192000, 64000, 1400), 1
+        )
+
+    def test_lms_block_ranges_partitions_range_exactly(self):
+        # Regression test for the block-partitioning logic behind
+        # lms_filter's block-adaptive update (issue #20's runtime fix):
+        # _lms_block_ranges must cover [start, n) exactly once, in order,
+        # with no gaps or overlaps, and every block except possibly the
+        # last must be exactly block_size long. This is pure Python (no
+        # CuPy), so it directly exercises the shipped partitioning logic
+        # without needing a GPU -- the per-block filtering math itself
+        # still requires cp.ndarray input and is covered by lms_filter's
+        # own (GPU-gated) regression tests.
+        for start, n, block_size in (
+            (33, 1000, 256), (0, 10, 3), (5, 5, 4), (0, 1, 1), (10, 11, 5),
+        ):
+            ranges = list(_lms_block_ranges(start, n, block_size))
+            covered = []
+            for index, (block_start, block_end) in enumerate(ranges):
+                self.assertLess(block_start, block_end)
+                self.assertLessEqual(block_end - block_start, block_size)
+                # Every block except the last must be exactly block_size
+                # long -- the whole point of the issue #20 runtime fix is
+                # that the number of sequential (kernel-launching) Python
+                # iterations drops to ~n / block_size. A partition that
+                # emitted short blocks would silently give back that
+                # speedup while still passing the coverage check below.
+                if index < len(ranges) - 1:
+                    self.assertEqual(
+                        block_end - block_start, block_size,
+                        f"_lms_block_ranges(start={start}, n={n}, "
+                        f"block_size={block_size}) emitted a short "
+                        f"non-final block [{block_start}, {block_end}); "
+                        "only the final block may be shorter than "
+                        "block_size."
+                    )
+                covered.extend(range(block_start, block_end))
+            self.assertEqual(
+                covered, list(range(start, n)),
+                f"_lms_block_ranges(start={start}, n={n}, "
+                f"block_size={block_size}) does not exactly partition "
+                "[start, n) -- found a gap or overlap."
+            )
+
     @requires_gpu
     def test_lms_filter_no_extended_warmup_dropout(self):
         # Regression test: lms_filter() used to zero-initialize both its
@@ -306,63 +413,219 @@ class TestAudioFattener(unittest.TestCase):
         )
 
     @requires_gpu
-    def test_ist_harmonic_amplitude_scales_with_signal_peak(self):
-        # Regression test for a cycle 3 finding: iterative_soft_
-        # thresholding's harmonic injection term used a fixed absolute
-        # total amplitude (0.1, spread across max_iter iterations) instead
-        # of one scaled to the input's own peak amplitude. upscale() never
-        # normalizes before calling this function -- `data` is raw-PCM-
-        # scale (peak ~1e4-3e4 for 16-bit-sourced audio) -- so a fixed
-        # absolute total of 0.1 was an ~1e-5 relative contribution: far too
-        # small to survive the pipeline's later autoscale/normalize steps
-        # (which only apply a global scalar gain and cannot change that
-        # ratio) as measurable added detail. This test isolates the
-        # harmonic term's relative contribution using a threshold small
-        # enough that essentially nothing gets masked in either the time
-        # or frequency domain (so the FFT/IFFT round trip is
-        # near-identity and the harmonic term is the dominant source of
-        # change), and checks that the relative (not absolute) added
-        # contribution is consistent across a large change in the input's
-        # absolute scale.
-        n = 2000
-        t = cp.linspace(0, 1, n, endpoint=False)
-        base_shape = (
-            cp.sin(2 * cp.pi * 300 * t) + 0.3 * cp.sin(2 * cp.pi * 700 * t)
-        )
-        small_scale_signal = base_shape * 1.0
-        large_scale_signal = base_shape * 10000.0
-        negligible_threshold = 1e-9
-        max_iter = 10
-
-        out_small = iterative_soft_thresholding(
-            small_scale_signal.copy(), max_iter, negligible_threshold
-        )
-        out_large = iterative_soft_thresholding(
-            large_scale_signal.copy(), max_iter, negligible_threshold
+    def test_lms_filter_block_size_one_matches_reference_per_sample_update(
+        self
+    ):
+        # Regression test for a coverage gap flagged by audio-quality-
+        # checker: lms_filter's own docstring claims "block_size=1
+        # reproduces the exact prior per-sample update" (verified there
+        # only algebraically, in prose), but no test asserted it -- a
+        # future change to the block-averaged gradient formula (e.g. an
+        # off-by-one in block_len, or applying the block mean even when
+        # block_len == 1) could silently break the claimed equivalence
+        # while every other test (which only exercises the default
+        # block_size=256) kept passing. This builds an independent
+        # reference implementation of the exact per-sample LMS update
+        # described in lms_filter's own comments (same w initialization,
+        # same delay convention, same "2 * mu * e * x" update term, no
+        # block averaging -- just a plain per-sample Python loop) and
+        # checks it against lms_filter(..., block_size=1).
+        sr = 44100
+        num_taps = 16
+        mu = 0.001
+        delay = 1
+        t = cp.linspace(0, 0.05, int(sr * 0.05), endpoint=False)
+        signal = (
+            0.5 * cp.sin(2 * cp.pi * 300 * t)
+            + 0.2 * cp.sin(2 * cp.pi * 900 * t)
         )
 
-        added_small = float(
-            cp.max(cp.abs(out_small - small_scale_signal))
-        )
-        added_large = float(
-            cp.max(cp.abs(out_large - large_scale_signal))
-        )
-        relative_added_small = added_small / float(
-            cp.max(cp.abs(small_scale_signal))
-        )
-        relative_added_large = added_large / float(
-            cp.max(cp.abs(large_scale_signal))
+        def reference_per_sample_lms(sig, desired):
+            n = len(sig)
+            w = cp.zeros(num_taps, dtype=cp.float64)
+            w[0] = 1.0
+            filtered = cp.zeros(n, dtype=cp.float64)
+            start = num_taps + delay
+            filtered[:start] = sig[:start]
+            for i in range(start, n):
+                y = cp.float64(0.0)
+                for k in range(num_taps):
+                    y = y + w[k] * sig[i - delay - k]
+                e = desired[i] - y
+                for k in range(num_taps):
+                    w[k] = w[k] + 2 * mu * e * sig[i - delay - k]
+                w = cp.clip(w, -1e10, 1e10)
+                filtered[i] = y
+            return filtered, w
+
+        ref_filtered, ref_w = reference_per_sample_lms(signal, signal)
+        block_filtered, block_w = lms_filter(
+            signal, signal, mu=mu, num_taps=num_taps, delay=delay,
+            block_size=1, return_weights=True
         )
 
-        self.assertGreater(
-            relative_added_large, relative_added_small * 0.5,
-            "iterative_soft_thresholding's harmonic contribution collapses "
-            "relative to the signal's own peak as absolute scale grows "
-            f"(relative added: {relative_added_small:.3g} at peak=1 vs "
-            f"{relative_added_large:.3g} at peak=10000); the harmonic "
-            "amplitude is likely a fixed absolute constant rather than "
-            "one scaled to the input's own amplitude, making it "
-            "unmeasurable at real (raw PCM-scale) audio amplitudes."
+        self.assertTrue(
+            bool(cp.allclose(block_filtered, ref_filtered, atol=1e-9)),
+            "lms_filter(block_size=1) output does not match an "
+            "independent per-sample LMS reference implementation of the "
+            "same update rule; the docstring's claim that block_size=1 "
+            "reproduces the exact prior per-sample update no longer "
+            "holds."
+        )
+        self.assertTrue(
+            bool(cp.allclose(block_w, ref_w, atol=1e-9)),
+            "lms_filter(block_size=1) final tap weights do not match an "
+            "independent per-sample LMS reference implementation; the "
+            "block_size=1 equivalence claim does not hold for the "
+            "weight-update path."
+        )
+
+    @requires_gpu
+    def test_lms_filter_block_size_bounds_sequential_iterations(self):
+        # Regression test for a coverage gap flagged by audio-quality-
+        # checker: lms_filter's docstring claims the block-adaptive
+        # rewrite (issue #20) "cuts the number of sequential Python-loop
+        # iterations ... from n to roughly n / block_size" with a default
+        # block_size of 256, but nothing asserted either the default or
+        # the iteration count itself. A regression that silently made
+        # every block length 1 sample (e.g. lms_filter no longer passing
+        # its block_size argument through to _lms_block_ranges, or the
+        # default being changed) would pass every other test in this
+        # module (which only check output values, not how many
+        # sequential iterations produced them) while quietly
+        # reintroducing the exact per-sample-loop runtime issue that
+        # issue #20 reported (27.5 minutes for a 15.2s source).
+        default_block_size = inspect.signature(lms_filter).parameters[
+            'block_size'
+        ].default
+        self.assertEqual(
+            default_block_size, 256,
+            "lms_filter's default block_size changed from the "
+            "documented 256; this silently changes the default runtime/"
+            "accuracy tradeoff described in its docstring."
+        )
+
+        sr = 44100
+        num_taps = 16
+        t = cp.linspace(0, 0.2, int(sr * 0.2), endpoint=False)
+        signal = (
+            0.5 * cp.sin(2 * cp.pi * 300 * t)
+            + 0.2 * cp.sin(2 * cp.pi * 900 * t)
+        )
+        n = len(signal)
+        start = num_taps + 1  # delay defaults to 1
+
+        call_counts = []
+
+        def counting_block_ranges(block_start, block_n, block_size):
+            ranges = list(
+                _lms_block_ranges(block_start, block_n, block_size)
+            )
+            call_counts.append(len(ranges))
+            return iter(ranges)
+
+        with mock.patch.object(
+            feed_module, '_lms_block_ranges',
+            side_effect=counting_block_ranges
+        ):
+            lms_filter(signal, signal, num_taps=num_taps, block_size=256)
+            lms_filter(signal, signal, num_taps=num_taps, block_size=1)
+
+        iterations_default, iterations_per_sample = call_counts
+        expected_default_iterations = math.ceil((n - start) / 256)
+
+        self.assertEqual(
+            iterations_default, expected_default_iterations,
+            "lms_filter's default block_size=256 run did not perform "
+            "the expected number of sequential block iterations "
+            f"(expected {expected_default_iterations}, got "
+            f"{iterations_default})."
+        )
+        self.assertEqual(
+            iterations_per_sample, n - start,
+            "lms_filter(block_size=1) did not perform exactly one "
+            f"sequential iteration per sample (expected {n - start}, "
+            f"got {iterations_per_sample}); this is exactly the "
+            "per-sample-loop behavior issue #20's block-adaptive "
+            "rewrite was meant to replace."
+        )
+        self.assertLess(
+            iterations_default, iterations_per_sample / 100,
+            "lms_filter's default block_size=256 only cut sequential "
+            f"iterations from {iterations_per_sample} to "
+            f"{iterations_default}, far short of the roughly "
+            "two-orders-of-magnitude reduction issue #20's fix "
+            "documents; this would erode the fix's runtime improvement."
+        )
+
+    @requires_gpu
+    def test_ist_no_static_floor_in_quiet_segment(self):
+        # Regression test for a cycle 4 finding: cycle 3's harmonic-
+        # reconstruction term derived its frequency from cp.argmax of the
+        # ENTIRE buffer's masked FFT every iteration. A whole-buffer FFT
+        # has one global dominant bin, so for any real multi-thousand-
+        # sample upscaled channel that "content-derived" frequency was
+        # actually static across all iterations and the whole track -- a
+        # constant, non-source tone (measured by audio-quality-checker: a
+        # 98.168 Hz component at -28.7 dBFS spanning the entire output),
+        # not time-varying detail. Its amplitude was also derived once
+        # from the buffer's global peak and applied uniformly regardless
+        # of local signal level, so it acted as a hard floor that
+        # collapsed measured dynamic range in quiet passages from 57.1 dB
+        # (reference) to 25.4 dB (output). This cycle removed the
+        # harmonic term entirely (see iterative_soft_thresholding's own
+        # docstring) rather than attempting a fourth revision of it.
+        #
+        # The test this replaces (test_ist_harmonic_term_lands_in_
+        # audible_band) only ever exercised a short, single-segment
+        # n=2000 buffer, where a single dominant bin is genuinely
+        # representative of the whole signal -- it could never have
+        # caught this failure mode. This test instead builds a two-
+        # segment, longer buffer (a loud segment followed by a much
+        # quieter one, both at real-PCM-like amplitude scale) and
+        # exercises iterative_soft_thresholding's output the same way
+        # upscale_channels actually uses it (added back onto the original
+        # signal, not used standalone), then checks that the quiet
+        # segment's level does not rise far above its pre-IST level --
+        # i.e. that IST does not inject a static, content-independent
+        # floor.
+        sr = 44100
+        t_loud = cp.arange(sr, dtype=cp.float64) / sr  # 1s
+        t_quiet = cp.arange(sr, dtype=cp.float64) / sr  # 1s
+        loud_segment = 20000.0 * cp.sin(2 * cp.pi * 400 * t_loud)
+        quiet_segment = 5.0 * cp.sin(2 * cp.pi * 400 * t_quiet)
+        data = cp.concatenate([loud_segment, quiet_segment])
+        n_loud = len(loud_segment)
+
+        max_iter = 20
+        threshold = 0.6
+
+        ist_changes = iterative_soft_thresholding(
+            data.copy(), max_iter, threshold
+        )
+        # Matches upscale_channels' actual usage: the interpolated signal
+        # plus IST's returned value, not IST's output taken standalone.
+        combined = data + ist_changes
+
+        quiet_rms_before = float(cp.sqrt(cp.mean(quiet_segment ** 2)))
+        quiet_rms_after = float(cp.sqrt(cp.mean(combined[n_loud:] ** 2)))
+
+        # A generous bound: allow up to a ~4x (12 dB) rise, which covers
+        # this function's own separately-documented, pre-existing
+        # near-lossless-round-trip "doubling" effect (threshold barely
+        # masks anything at real PCM scale, so IST's output is close to a
+        # second copy of the input added back on top) without allowing a
+        # large, content-independent static floor like the one this test
+        # guards against (measured, cycle 3 regression: >50 dB rise in an
+        # equivalent synthetic case).
+        self.assertLess(
+            quiet_rms_after, quiet_rms_before * 4.0,
+            "iterative_soft_thresholding (as combined by upscale_channels) "
+            f"raised the quiet segment's RMS from {quiet_rms_before:.4g} "
+            f"to {quiet_rms_after:.4g} -- a "
+            f"{20 * math.log10(quiet_rms_after / quiet_rms_before):.1f} dB "
+            "rise -- consistent with a static, content-independent tone/"
+            "floor being injected rather than genuine local detail."
         )
 
     @requires_gpu
@@ -513,14 +776,12 @@ class TestAudioFattener(unittest.TestCase):
         # (via two target_bitrate_kbps values) since the cutoff's
         # correctness depends on the original/new sample-rate ratio, not
         # just a single hard-coded case. toggle_adaptive_filter=False and
-        # max_iterations=2 keep this fast (lms_filter's per-sample Python
-        # loop is slow -- see feed.py's own notes). Uses target_format=
-        # 'wav' rather than 'flac': this source's deterministic LAME CBR
-        # encode (64 kbps) combined with a high target_bitrate_kbps drives
-        # a large enough upscale_factor that the resulting sample rate
-        # exceeds FLAC's ~655350 Hz format ceiling (a pre-existing,
-        # unrelated libsndfile/FLAC limitation) -- WAV has no such low
-        # ceiling and is an equally valid target_format for this check.
+        # max_iterations=2 keep this fast. Uses target_format='wav' rather
+        # than 'flac' -- both are equally valid target_formats for this
+        # check; as of the issue #20 fix, compute_upscale_factor's
+        # realistic-sample-rate ceiling means this no longer risks
+        # approaching FLAC's own separate ~655350 Hz format ceiling
+        # either way.
         original_nyquist = 44100 / 2.0
 
         for target_bitrate_kbps in (800, 1400):
@@ -581,29 +842,131 @@ class TestAudioFattener(unittest.TestCase):
                     os.remove(output_file)
 
     @requires_gpu
-    def test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate(
+    def test_upscale_end_to_end_with_adaptive_filter_enabled(self):
+        # Regression test for a coverage gap flagged by audio-quality-
+        # checker after issue #20's block-adaptive lms_filter rewrite:
+        # every existing end-to-end upscale() test passes
+        # toggle_adaptive_filter=False to stay fast, so the exact stage
+        # issue #20 rewrote (previously impractical to enable at all --
+        # 27.5 minutes for the adaptive-filter stage alone on a 15.2s
+        # source) had zero pipeline-level coverage; only isolated
+        # lms_filter unit tests (built directly against synthetic
+        # arrays, never routed through the real upscale() pipeline)
+        # exercised it. This runs a real upscale() call with
+        # toggle_adaptive_filter=True and a small max_iterations to stay
+        # fast, and checks the same coherence properties the other e2e
+        # tests check, specifically on the adaptive-filtered output, so
+        # a wiring regression in upscale()'s lms_filter call (wrong
+        # axis, shape mismatch, numerical instability at real pipeline
+        # scale) would be caught even though it wouldn't show up in any
+        # isolated lms_filter unit test.
+        output_file = 'test_output_adaptive_filter.flac'
+        try:
+            upscale(
+                input_file_path=self.test_mp3_file,
+                output_file_path=output_file,
+                source_format='mp3',
+                target_format='flac',
+                max_iterations=2,
+                threshold_value=0.6,
+                target_bitrate_kbps=800,
+                toggle_normalize=True,
+                toggle_autoscale=True,
+                toggle_adaptive_filter=True,
+            )
+
+            info = sf.info(output_file)
+            out_data, _ = sf.read(output_file, always_2d=True)
+
+            # Container-level properties must survive the adaptive-filter
+            # stage too, not just the sample values: lms_filter returns a
+            # same-length array, so the output must keep the bounded
+            # sample rate compute_upscale_factor derived and the input's
+            # ~1 s duration. Without these, a stage that silently dropped
+            # or duplicated samples (e.g. a block-partitioning off-by-one
+            # at the tail) would still pass every check below.
+            _, _, source_bitrate, _ = read_audio(
+                self.test_mp3_file, audio_format='mp3'
+            )
+            expected_upscale_factor = compute_upscale_factor(
+                44100, source_bitrate, 800
+            )
+            self.assertEqual(
+                info.samplerate, 44100 * expected_upscale_factor,
+                "Adaptive-filtered output sample rate does not match "
+                "compute_upscale_factor's formula."
+            )
+            self.assertLessEqual(
+                info.samplerate, MAX_REALISTIC_SAMPLE_RATE_HZ
+            )
+            self.assertAlmostEqual(
+                info.duration, 1.0, delta=0.05,
+                msg="Adaptive-filtered output duration does not match the "
+                    "1 s input; lms_filter must not change the signal's "
+                    "length."
+            )
+
+            self.assertTrue(
+                np.all(np.isfinite(out_data)),
+                "upscale() with toggle_adaptive_filter=True produced "
+                "NaN/Inf samples."
+            )
+            self.assertGreater(
+                np.sqrt(np.mean(out_data ** 2)), 1e-3,
+                "upscale() with toggle_adaptive_filter=True produced "
+                "(near) silent output."
+            )
+            self.assertLess(
+                np.mean(np.abs(out_data) > 0.999), 0.05,
+                "upscale() with toggle_adaptive_filter=True clipped "
+                "more than 5% of output samples to full scale."
+            )
+
+            mono = out_data[:, 0]
+            windowed = (mono - np.mean(mono)) * np.hanning(len(mono))
+            spectrum = np.abs(np.fft.rfft(windowed))
+            out_freqs = np.fft.rfftfreq(len(mono), 1.0 / info.samplerate)
+            self.assertAlmostEqual(
+                out_freqs[np.argmax(spectrum)], 440.0, delta=10.0,
+                msg="Dominant frequency of the adaptive-filtered "
+                    "upscaled output is not (close to) the source's "
+                    "440 Hz tone; lms_filter's block-adaptive rewrite "
+                    "may be distorting the signal when actually wired "
+                    "into upscale()."
+            )
+        finally:
+            if os.path.exists(output_file):
+                os.remove(output_file)
+
+    @requires_gpu
+    def test_target_bitrate_kbps_drives_bounded_realistic_upscale_factor(
         self
     ):
-        # Regression test documenting the intended contract of
-        # target_bitrate_kbps: it is used only to derive upscale_factor
-        # relative to the source file's own bitrate
-        # (upscale_factor = round(target_bitrate_kbps * 1000 / source
-        # bitrate)); its 800-1411 (flac) valid range is a sanity bound on
-        # this parameter itself, not a promise about the produced file's
-        # real bitrate. The output is always written as uncompressed PCM
-        # (write_audio) at an upsampled sample rate, so its actual bitrate
-        # is, by design, substantially higher than target_bitrate_kbps
-        # once upscale_factor > 1 -- audio-quality-checker measured this
-        # divergence (target 1400 kbps vs. ~7822 kbps effective output) and
-        # flagged it; this test confirms the divergence is a documented,
-        # structural consequence of writing uncompressed high-resolution
-        # PCM, not an upscale_factor computation bug.
+        # Regression test for issue #20, documenting the fixed contract of
+        # target_bitrate_kbps: it still drives upscale_factor relative to
+        # the source file's own bitrate (see compute_upscale_factor), but
+        # the derived factor is now clamped so the output sample rate
+        # never exceeds MAX_REALISTIC_SAMPLE_RATE_HZ. Before this fix, the
+        # unbounded ratio drove sample rates past 250-300 kHz and an
+        # effective output bitrate of ~7822 kbps for a comparable input
+        # (audio-quality-checker measurement); this test confirms both the
+        # sample rate and the real output bitrate now stay within a
+        # realistic range end-to-end, not just at the compute_upscale_
+        # factor unit level.
         _, _, source_bitrate, _ = read_audio(
             self.test_mp3_file, audio_format='mp3'
         )
-        target_bitrate_kbps = 800  # minimum of the valid flac range
-        expected_upscale_factor = round(
-            target_bitrate_kbps * 1000 / source_bitrate
+        target_bitrate_kbps = 1400  # near the top of the valid flac range,
+        # deliberately chosen because it is exactly the kind of value that
+        # used to drive an oversized upscale_factor (e.g. round(1400 / 192)
+        # = 7) against a typical compressed source bitrate.
+        expected_upscale_factor = compute_upscale_factor(
+            44100, source_bitrate, target_bitrate_kbps
+        )
+        self.assertLessEqual(
+            44100 * expected_upscale_factor, MAX_REALISTIC_SAMPLE_RATE_HZ,
+            "Test setup assumption violated: compute_upscale_factor should "
+            "never derive a sample rate above the realistic ceiling."
         )
 
         output_file = 'test_output_bitrate.flac'
@@ -622,13 +985,19 @@ class TestAudioFattener(unittest.TestCase):
             )
 
             info = sf.info(output_file)
-            # The output sample rate must reflect the documented
-            # upscale_factor formula (source_sample_rate * upscale_factor).
+            # The output sample rate must reflect compute_upscale_factor's
+            # bounded formula (source_sample_rate * upscale_factor), and
+            # must itself stay within the realistic ceiling end-to-end.
             self.assertEqual(
                 info.samplerate, 44100 * expected_upscale_factor,
-                "Output sample rate does not match the documented "
-                "upscale_factor = round(target_bitrate_kbps * 1000 / "
-                "source bitrate) formula."
+                "Output sample rate does not match compute_upscale_factor's "
+                "formula."
+            )
+            self.assertLessEqual(
+                info.samplerate, MAX_REALISTIC_SAMPLE_RATE_HZ,
+                f"Output sample rate ({info.samplerate} Hz) exceeds the "
+                "realistic playback ceiling; reproduces issue #20's "
+                "unrealistic sample rate report."
             )
 
             # The upscaled output must also be coherent *audio*, not just a
@@ -674,17 +1043,24 @@ class TestAudioFattener(unittest.TestCase):
             real_bitrate_kbps = (
                 os.path.getsize(output_file) * 8 / info.duration / 1000
             )
-            # By design (uncompressed PCM at an upsampled rate), the real
-            # output bitrate must be well above target_bitrate_kbps even
-            # at the minimum of the valid range -- this is the documented,
-            # intentional divergence, not a defect to eliminate.
-            self.assertGreater(
-                real_bitrate_kbps, target_bitrate_kbps * 2,
-                "Expected the real output bitrate to substantially exceed "
-                "target_bitrate_kbps (uncompressed PCM at an upsampled "
-                "rate); if this no longer holds, target_bitrate_kbps's "
-                "documented contract (a upscale_factor-derivation knob, "
-                "not an output bitrate promise) may have changed."
+            # The output is still uncompressed-PCM-then-FLAC-compressed at
+            # an upsampled rate, so its real bitrate need not equal
+            # target_bitrate_kbps -- but as of the issue #20 fix it must
+            # now stay within a realistic ceiling derived from the same
+            # MAX_REALISTIC_SAMPLE_RATE_HZ bound: 24-bit mono PCM at that
+            # rate is an absolute upper bound on what FLAC (lossless, so
+            # never larger than raw PCM) could produce; a small margin
+            # covers container/frame overhead.
+            max_realistic_bitrate_kbps = (
+                MAX_REALISTIC_SAMPLE_RATE_HZ * 24 / 1000
+            )
+            self.assertLessEqual(
+                real_bitrate_kbps, max_realistic_bitrate_kbps * 1.05,
+                f"Real output bitrate ({real_bitrate_kbps:.1f} kbps) "
+                "exceeds the realistic ceiling implied by "
+                f"MAX_REALISTIC_SAMPLE_RATE_HZ "
+                f"({max_realistic_bitrate_kbps:.1f} kbps); reproduces "
+                "issue #20's unrealistic bitrate report."
             )
         finally:
             if os.path.exists(output_file):

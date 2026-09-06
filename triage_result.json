@@ -1,0 +1,5 @@
+{
+  "relevant": true,
+  "clean_problem_statement": "When calling upscale() with target_bitrate_kbps=900 and adaptive_filter disabled, the resulting FLAC file has unrealistic output parameters: bitrate ~5300 kbps and sample rate ~250kHz (should be 44.1–96kHz). Additionally, enabling adaptive_filter causes the function to hang/run extremely slowly (30+ minutes for a 15-second audio file), making it impractical on consumer hardware (RTX 3060). Multiple users report the same behavior.",
+  "notes": ""
+}
