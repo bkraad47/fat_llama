@@ -14,7 +14,7 @@ Also read `README.md` at the repo root in full, right now, before Step 0 — it'
 
 This skill coordinates other skills/subagents — it does not review, test, or fix anything itself. It also touches git branches, tags, and (at the very end, with confirmation) the GitHub remote — read Step 0 and Step 7 carefully.
 
-This skill also runs non-interactively from `.github/workflows/issue-branch-resolve.yml` when `ITERATE_FAT_LLAMA_CI_MODE=1` is set in the environment — see `.claude/skills/rules/iterate-fat-llama.md`'s "CI / GitHub Actions mode" section for the exact behavior differences (Step 0.2 and Step 7 change) before proceeding if that variable is present.
+This skill also runs non-interactively from `.github/workflows/issue-branch-resolve.yml` when `ITERATE_FAT_LLAMA_CI_MODE=1` is set in the environment — see `.claude/skills/rules/iterate-fat-llama.md`'s "CI / GitHub Actions mode" section for the exact behavior differences (Steps 0.2, 0.4, and 7 change) before proceeding if that variable is present.
 
 ## Logging
 
@@ -25,8 +25,8 @@ Before Step 0, open this run's log file per `.claude/rules/logging.md` (name: `i
 1. Read `README.md` in full (if not already done per the note above) and log a one-line entry recording that the run's mission context is fat_llama's own README plus `.claude/rules/project-mission.md`.
 2. `git status`. If there are uncommitted changes that aren't something you just made in this run, stop and ask the user before doing anything else — don't stash or discard in-progress work.
 3. Record the starting branch as `BASE_BRANCH` and current HEAD as `BASE_COMMIT`.
-4. Create a new branch per the naming convention in `.claude/skills/rules/iterate-fat-llama.md` and switch to it. Tell the user you've switched branches — `BASE_BRANCH` is left untouched for the rest of this run.
-5. Tag the untouched starting state per that same naming convention (`iter-0`). This is candidate `C_0`.
+4. Decide whether to isolate, per the Naming conventions rule: if `BASE_BRANCH` is `main` (or another shared/long-lived branch), create a new working branch and switch to it — tell the user you've switched branches, `BASE_BRANCH` is left untouched for the rest of this run. Otherwise (the common case — an already single-purpose, disposable branch, e.g. anything CI checks out) stay on `BASE_BRANCH` directly; don't create a second branch just to abandon it later.
+5. Tag the untouched starting state per that same naming convention (`iter-0`), on whichever branch you're now operating on. This is candidate `C_0`.
 
 ## Steps 1–4 — the iteration loop (up to MAX_CYCLES)
 
@@ -64,13 +64,13 @@ If all MAX_CYCLES cycles complete without the early stop in (c):
 2. Bump it per the version-bump policy in `.claude/skills/rules/iterate-fat-llama.md` (patch by default, minor only if `DIRECTIVES` explicitly asked for new functionality). State which you chose and why.
 3. Update `setup.py`'s `version` field and fill the version number into the `CHANGELOG.md` entry from Step 5.
 
-## Step 7 — version-specific PR
+## Step 7 — ship the result
 
 Follow the "Remote actions" policy in `.claude/skills/rules/iterate-fat-llama.md` — confirmation before anything remote:
 
 1. Show the user a summary before doing anything remote: the version bump, files changed, the changelog entry, and which cycle's state was kept (or that the loop stopped early because it was already satisfactory). **Ask for explicit confirmation before pushing or opening a PR.**
 2. On confirmation: commit the docs/changelog/version-bump changes.
-3. Rename the local branch to the version-branch naming convention: `git branch -m v-<new_version>`.
-4. Push it: `git push -u origin v-<new_version>`.
-5. Open a PR against `main`: `gh pr create --base main --title "v-<new_version>" --body "<changelog entry>"`. If `gh` isn't installed or authenticated, push the branch anyway and give the user the compare link (`https://github.com/bkraad47/fat_llama/compare/main...v-<new_version>`) so they can open the PR by hand.
-6. Report the PR URL (or the compare link) as the final result, and end with the `ITERATE_FAT_LLAMA_DONE_JSON:` block per the Success reporting contract in `.claude/skills/rules/iterate-fat-llama.md` — this is what proves the run actually reached here, not just exited cleanly.
+3. **If you created an isolated working branch in Step 0.4** (`BASE_BRANCH` was `main`/shared): rename it to the version-branch naming convention (`git branch -m v-<new_version>`) and push it (`git push -u origin v-<new_version>`).
+   **If you stayed on `BASE_BRANCH` directly** (the common case): no rename — push `BASE_BRANCH` itself with `git push --force-with-lease origin BASE_BRANCH` (not a plain push; see Remote actions in the rules file for why force-with-lease is needed here specifically).
+4. Open a PR against `main` from whichever branch you just pushed: `gh pr create --base main --head <branch> --title "v-<new_version>" --body "<changelog entry>"`. If `gh` isn't installed or authenticated, push anyway and give the user the compare link (`https://github.com/bkraad47/fat_llama/compare/main...<branch>`) so they can open the PR by hand.
+5. Report the PR URL (or the compare link) as the final result, and end with the `ITERATE_FAT_LLAMA_DONE_JSON:` block per the Success reporting contract in `.claude/skills/rules/iterate-fat-llama.md` — this is what proves the run actually reached here, not just exited cleanly.
