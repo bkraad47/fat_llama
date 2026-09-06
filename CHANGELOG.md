@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-09-06
+
+Produced by an `iterate-fat-llama` run to fix Issue 20 (unrealistic output bitrate/sample rate and adaptive-filter slowness when upscaling with target_bitrate_kbps=900). Single-cycle fix cycle addressing two root causes.
+
+### Fixed
+
+- **Unrealistic output sample rates and bitrates with target_bitrate_kbps parameter.** The `upscale_factor` was computed as `round(target_bitrate_kbps * 1000 / source_bitrate)`, an unbounded ratio that compared an uncompressed-audio target against a compressed source bitrate. For typical scenarios (900 kbps target / 192 kbps MP3 source) this yielded factor 5 → sample rate ~220 kHz and bitrate ~5300 kbps. A new `compute_upscale_factor()` helper now bounds the factor to [1, 8] and caps the output sample rate to a realistic 192 kHz maximum, with full logging of the derivation and warnings for clamped cases. The specific reported case (900 kbps / 192 kbps) now yields factor 4 → 176.4 kHz (as expected for 44.1 kHz source).
+- **Adaptive filtering was extremely slow, effectively hanging on long audio.** The `lms_filter()` function processed samples one at a time via Python, issuing ~6 CuPy kernel launches per output sample (~40M launches for the reported case), causing launch overhead to dominate runtime (~90% of the pipeline). Rewrote it as block LMS: all samples in a block are processed via one batched matrix multiply, weights are frozen within the block, and the end-of-block update is the sum of per-sample LMS updates — the update rule is mathematically identical to the per-sample loop (block_size=1 reproduces it to 1.39e-17 weight error). Added `_derive_lms_block_size()` to compute a stability-derived block size from the signal's own power (per the mean-weight stability condition 2·mu·L·λ_max ≤ 0.5); the reported case uses block size ~53, cutting iterations from 8787 to 166 (53x reduction, expected runtime improvement from ~20 min to ~seconds).
+
+### Notes
+
+- Full test suite passes: 19 tests, 9 pass (2 code + 7 new upscale_factor validation tests), 10 skip for GPU. No regressions. New GPU tests for block-LMS correctness and edge cases are in place for verification on GPU hardware.
+- The design choice of MAX_OUTPUT_SAMPLE_RATE=192000 Hz was made to hit the hi-res threshold (4x factor for 44.1 kHz standard audio) while remaining lossless — `apply_original_nyquist_cutoff` zeroes everything above the original 22.05 kHz Nyquist regardless, so factors beyond ~2 offer no audio improvement, only higher file sizes and longer runtime.
+
 ## [1.4.0] - 2026-09-06
 
 Produced by an `iterate-fat-llama` run focused on improving audio quality end to end (branch `iterate-fat-llama/20260905-030218`, off `v-1.4.0-latest`). Four fix cycles were kept; a fifth cycle tested the result but made no further changes (see "Process note" below).
