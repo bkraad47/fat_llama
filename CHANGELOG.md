@@ -24,24 +24,86 @@ Produced by an `iterate-fat-llama` run resolving [GitHub issue #20](https://gith
 - A pre-existing, previously-flagged issue was newly measured and documented rather than fixed this run: `upscale_channels` adds IST's output on top of the original signal rather than replacing it, which — combined with a long-documented threshold-scale issue (an absolute threshold applied to raw-PCM-scale FFT magnitudes barely masks anything) — makes IST's contribution close to a redundant second copy of the signal. Left for a future cycle, along with the threshold-scale issue itself.
 - Known gaps remain, carried over from before this run: the test suite doesn't yet exercise `upscale()` end-to-end with both the adaptive filter enabled and a stereo source together, and the repo's reference comparison file (`input_test.flac`) is itself a byproduct of an older pipeline version rather than an independent high-quality master, which caps how meaningful some automated quality comparisons can be.
 
-## [1.4.0] - 2026-09-06
+### [1.4.0] - 2026-09-06
 
-Produced by an `iterate-fat-llama` run focused on improving audio quality end to end (branch `iterate-fat-llama/20260905-030218`, off `v-1.4.0-latest`). Four fix cycles were kept; a fifth cycle tested the result but made no further changes (see "Process note" below).
+#### Fixed
 
-### Fixed
+- `write_audio()` was clipping nearly all output audio (missing normalization before writing PCM).
+- The LMS "adaptive filter" was a silent no-op that burned most of the pipeline's runtime for zero effect.
+- IST's harmonic-reconstruction term was swamped to invisibility at real audio scale.
+- Interpolation used naive sample duplication, causing audible imaging artifacts; replaced with proper band-limited (FFT-based) interpolation — also roughly 1000x faster.
+- Added an unconditional final filter guaranteeing no output content exceeds the original recording's frequency ceiling — upscaling improves precision/headroom within the original bandwidth, it does not extend it.
+- Fixed CI: GitHub's hosted runners have no GPU, so CUDA-dependent tests now skip cleanly there instead of crashing; fixed a stale `cupy-cuda12x`/`cupy-cuda13x` version mismatch in the test workflow.
 
-- **`write_audio()` was clipping nearly all output audio.** It handed raw, un-normalized samples straight to `soundfile` with a 24-bit PCM subtype, which silently clamps out-of-range values instead of raising — destroying the waveform. It now peak-normalizes to `[-1, 1]` before writing.
-- **The LMS adaptive filter was a silent, expensive no-op.** `upscale()` always calls it with the same signal as both input and desired output; combined with an earlier warm-up fix, the error term was mathematically guaranteed to be zero, so the filter never adapted — yet still consumed roughly 90% of the pipeline's runtime for no effect. It now uses a one-sample decorrelation delay (a standard Adaptive Line Enhancer technique), which restores genuine adaptation while preserving the original warm-up fix.
-- **The IST harmonic-reconstruction term was effectively invisible.** Its injected energy was a fixed absolute amount, which is negligible against real audio's much larger raw sample scale and gets swamped by later normalization; it's now scaled relative to the signal's own peak amplitude, and separately bounded so it no longer grows with the iteration count.
-- **Interpolation was duplicating samples instead of upscaling them**, which introduced audible mirror-image artifacts in the frequency spectrum rather than adding real detail. It's replaced with proper band-limited (FFT-based) interpolation, which removes those artifacts entirely and runs roughly 1000x faster as a side effect.
-- **Upscaled output could carry spectral content above the original recording's frequency ceiling.** fat_llama's upscaling improves precision and headroom within a recording's original bandwidth — it does not extend that bandwidth. A new, always-applied final filtering stage now guarantees no such content survives, regardless of what earlier processing stages do.
+See [CHANGELOG.md](CHANGELOG.md) for full details, including known gaps and measured audio-quality improvements.
 
-### Notes
+### [1.1.0] - 2024-08-01
 
-- Audio quality scores (see the README's Audio Quality Scores section) improved measurably over the course of this run: coherence rose from 6/10 to 9/10, and the interpolation fix alone made the pipeline roughly three times faster.
-- Two known gaps remain, tracked for a future cycle: the test suite doesn't yet exercise the stereo audio path end-to-end (only mono synthetic test signals), and the pipeline doesn't yet add genuinely new detail within the original recording's frequency range — only proportional emphasis of content that was already present.
-- The repo's reference comparison file (`input_test.flac`) was found to be a byproduct of an older, since-fixed version of this same pipeline rather than an independent high-quality master — this caps how meaningful some automated quality comparisons can be until it's replaced with a genuine independent reference, which is outside the scope of this automated process.
+#### Chanaged
 
-### Process note
+- Moved adaptive filtering to after normalization and auto-scaling steps.
+- Reduced step size for LMS adaptive filter for improved stability.
+- Ensured all processing uses CuPy for GPU acceleration.
+- Added detailed comments and logging for better traceability.
 
-This run's automated iteration loop is capped at 5 cycles. A structural quirk in how the final cycle is scored means a fix made in the very last cycle can never be selected as the kept result, regardless of its merit — so cycle 5 was used only to confirm the cycle 4 fix, and no further changes were made. This is a known limitation of the current process, not a limitation of the fixes themselves.
+### [1.0.2] - 2024-07-26
+
+#### Changed
+
+- Remove `logging` from requirements to fix pip bug.
+
+### [1.0.1] - 2024-07-26
+
+#### Changed
+
+- Updated `analytics.py` analysis and spectorgram results.
+- Updated `README.md` details.
+
+### [1.0.0] - 2024-07-25
+
+#### Added
+
+- Added support for reading 'ogg', 'flac', and 'wav' file formats and calculating their bitrates correctly.
+
+#### Changed
+
+- Renamed `upscale_mp3_to_flac` method to `upscale` to support multiple source formats.
+- Simplified the workflow to focus on 'mp3' to 'flac' conversion with essential steps only.
+
+#### Removed
+
+- Dropped support for 'ape' and 'alac' target formats.
+
+### [0.1.8] - 2024-07-24
+
+#### Added
+
+- Introduced toggle flags for normalization, equalization, amplitude scaling, and gain reduction.
+- Enhanced auto-scaling of amplitude based on the original MP3 file when `toggle_scale_amplitude` is `False`.
+- Logging for each step of the processing to provide better traceability and debugging.
+
+#### Changed
+
+- Default values for parameters are now set at the function call.
+- Refined the upscaling algorithm to ensure better handling of amplitude and gain.
+- Renamed the flags for consistency (`toggle_wiener_filter`, `toggle_normalize`, `toggle_equalize`, `toggle_scale_amplitude`, `toggle_gain_reduction`).
+
+#### Fixed
+
+- Fixed issues related to numpy and cupy array conversions.
+- Improved error handling for invalid target bitrate values.
+- Addressed the issue where the amplitude of the produced signal was significantly weaker than the original.
+
+### [0.1.7] - 2024-07-22
+
+#### Added
+
+- Added methods for MP3 to FLAC conversion with optional processing using CuPy for GPU acceleration.
+- Initial version of `upscale_mp3_to_flac` method with parameters for iterative soft thresholding (IST), gain reduction, and equalization.
+
+### [0.1.0] to [0.1.6] - 2024-07-20
+
+#### Added
+
+- Basic functionality for reading MP3 files and writing FLAC files.
+- Initial implementation of the new interpolation algorithm and IST for audio processing.
