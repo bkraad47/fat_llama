@@ -78,9 +78,58 @@ def read_audio(file_path, audio_format):
     return sample_rate, samples, bitrate, audio
 
 
-def write_audio(file_path, sample_rate, data, audio_format):
+def write_audio(
+    file_path, sample_rate, data, audio_format, normalize=True,
+    reference_amplitude=None
+):
     """
     Write data to an audio file.
+
+    Issue #18 fixes:
+
+    (1) 64-bit float output precision: this pipeline computes internally
+    in float64/complex128 throughout (see new_interpolation_algorithm,
+    iterative_soft_thresholding, lms_filter, apply_original_nyquist_cutoff),
+    but previously quantized every output -- both 'flac' and 'wav' -- to
+    24-bit integer PCM ('PCM_24'), discarding that precision at the final
+    step. FLAC has no true float/double subtype: libsndfile's own FLAC
+    ceiling is PCM_24 (confirmed via `sf.available_subtypes('FLAC')`), so
+    'flac' output is unchanged -- 24-bit is already its real ceiling, and
+    "64-bit output" isn't a real FLAC/WAV container option (there is no
+    true 64-bit integer or float FLAC/WAV format in practice); the highest
+    fidelity actually available is used for each. WAV, however, does
+    support a genuine 64-bit float subtype ('DOUBLE'), which this now
+    uses: it stores the exact float64 values with no quantization and no
+    clamping at all (verified directly -- writing a 'DOUBLE'-subtype WAV
+    and reading it back reproduces the input bit-for-bit, even for values
+    outside [-1, 1], unlike 'PCM_24' which silently clamps).
+
+    (2) toggle_normalize wiring: `upscale()`'s `toggle_normalize` was
+    already an optional pipeline stage (normalize_signal), but this
+    function used to unconditionally peak-normalize (divide by data's own
+    max abs value) before writing, regardless of what upstream toggle did
+    -- so the final written file's peak amplitude always landed at
+    exactly 1.0 (0 dBFS) either way, making toggle_normalize=False have no
+    measurable effect on the actual output level. `normalize=False` now
+    divides by `reference_amplitude` (typically the source's own
+    AudioSegment.max_possible_amplitude, i.e. its bit-depth full-scale
+    value) instead of this buffer's own peak -- a fixed, lossless domain
+    conversion (raw-PCM-scale -> conventional float-PCM scale) rather than
+    a loudness change, so the output's level reflects the original
+    recording's own scale instead of always being stretched to touch
+    exactly full scale:
+      - For a float/double subtype (WAV), that division is the only
+        change -- no clamping is applied, so the result is exact/lossless
+        to float64 precision (verified: multiplying back by
+        `reference_amplitude` reproduces the pre-write values exactly).
+      - For an integer subtype (FLAC's mandatory 'PCM_24' -- there is no
+        way around some quantization for an integer container), the
+        result is additionally clipped to [-1, 1] as a safety net, since
+        soundfile silently clamps out-of-range float input for integer
+        subtypes instead of raising.
+      - If `reference_amplitude` isn't provided, this falls back to the
+        old peak-based divisor (the only way to guarantee a bounded
+        result without a caller-supplied reference).
 
     Parameters:
     file_path (str): The path to the output audio file.
@@ -88,31 +137,64 @@ def write_audio(file_path, sample_rate, data, audio_format):
     data (np.ndarray): The audio data to write.
     audio_format (str): The format of the output audio file
         (e.g., 'flac', 'wav').
+    normalize (bool): Whether to force a full-scale peak-normalize before
+        writing. Defaults to True (matches all prior behavior exactly).
+        When False, `reference_amplitude` is used instead of this
+        buffer's own peak, genuinely preserving the original relative
+        signal level (losslessly for float/double subtypes (wav); clipped
+        as a container-required safety net for integer subtypes (flac)).
+    reference_amplitude (float or None): Fixed scale (e.g. the source
+        file's own bit-depth full-scale amplitude) to divide by when
+        `normalize=False`. Ignored when `normalize=True`. Defaults to
+        None (falls back to peak-based scaling if needed).
     """
     data = data.astype(np.float64)
 
-    # soundfile expects floating-point input already scaled to [-1, 1] when
-    # writing an integer PCM subtype; it silently clamps anything outside
-    # that range instead of raising. read_audio() (and intermediate pipeline
-    # stages) hand back data on the raw PCM/processing scale, not [-1, 1],
-    # so peak-normalize here before writing to avoid clamping nearly every
-    # sample to full scale. A zero/near-zero peak (silence) is left as-is to
-    # avoid dividing by zero.
-    peak = np.max(np.abs(data))
-    if peak > 0:
-        data = data / peak
-    data = np.clip(data, -1.0, 1.0)
-
     if audio_format == 'flac':
-        sf.write(
-            file_path, data, sample_rate, format='FLAC', subtype='PCM_24'
-        )
+        sf_format, subtype = 'FLAC', 'PCM_24'
     elif audio_format == 'wav':
-        sf.write(
-            file_path, data, sample_rate, format='WAV', subtype='PCM_24'
-        )
+        # 64-bit float PCM -- the highest-fidelity subtype libsndfile
+        # supports for WAV (Issue #18 item 1), matching this pipeline's
+        # internal float64/complex128 computation exactly with zero
+        # quantization loss.
+        sf_format, subtype = 'WAV', 'DOUBLE'
     else:
         raise ValueError(f"Unsupported target format: {audio_format}")
+
+    is_float_subtype = subtype in ('FLOAT', 'DOUBLE')
+
+    if normalize:
+        # Full-scale peak-normalize (the pre-existing, backward-compatible
+        # default for both formats/subtypes).
+        peak = np.max(np.abs(data))
+        if peak > 0:
+            data = data / peak
+        if not is_float_subtype:
+            data = np.clip(data, -1.0, 1.0)
+    else:
+        # normalize=False: convert data from its raw-PCM-scale domain into
+        # the conventional float-PCM domain by dividing by a *fixed*
+        # reference (the caller-supplied reference_amplitude, typically
+        # the source's own bit-depth full-scale amplitude) instead of this
+        # buffer's own peak -- this is a lossless domain conversion, not a
+        # loudness change: it does not stretch the signal to touch exactly
+        # full scale the way normalize=True's peak-based divisor does, so
+        # the output genuinely reflects the original recording's relative
+        # level. Falls back to peak-based scaling only if no reference was
+        # given (the only way to guarantee a bounded result without one).
+        divisor = reference_amplitude
+        if not divisor:
+            divisor = np.max(np.abs(data))
+        if divisor > 0:
+            data = data / divisor
+        # Integer subtypes must fit [-1, 1] or soundfile silently clamps
+        # instead of raising; float/double subtypes store any value
+        # losslessly, so clipping here would only discard genuine (if
+        # rare) above-reference-scale content for no reason.
+        if not is_float_subtype:
+            data = np.clip(data, -1.0, 1.0)
+
+    sf.write(file_path, data, sample_rate, format=sf_format, subtype=subtype)
 
 
 def new_interpolation_algorithm(data, upscale_factor):
@@ -661,7 +743,14 @@ def upscale(
         target_bitrate_kbps once upscale_factor > 1, though now bounded
         to a realistic range rather than unbounded.
     toggle_normalize (bool): Whether to normalize the audio. Defaults to
-        True.
+        True. Controls both the in-pipeline peak-normalize stage and (as
+        of the Issue #18 fix) write_audio()'s own final scaling: when
+        False, the output genuinely preserves the original recording's
+        relative signal level (losslessly for 'wav', which is written as
+        64-bit float; scaled by the source's own full-scale amplitude
+        rather than forced to touch exactly full scale for 'flac', which
+        has no float subtype) instead of always being renormalized to
+        0 dBFS regardless of this flag, which was the prior behavior.
     toggle_autoscale (bool): Whether to autoscale the audio based on the
         original audio. Defaults to True.
     toggle_adaptive_filter (bool): Whether to apply adaptive filtering.
@@ -795,12 +884,22 @@ def upscale(
         )
     final_channels = cp.column_stack(cutoff_channels)
 
-    # Write the processed audio to the output file
+    # Write the processed audio to the output file. toggle_normalize is
+    # wired straight through to write_audio()'s own normalize argument
+    # (Issue #18 fix) -- previously write_audio() unconditionally
+    # peak-normalized regardless of this flag, so toggle_normalize=False
+    # had no effect on the actual written output level.
+    # audio.max_possible_amplitude is the source's own bit-depth
+    # full-scale reference, used (only when toggle_normalize=False and an
+    # integer subtype is written) to preserve the original recording's
+    # relative level instead of rescaling to this buffer's own peak.
     write_audio(
         output_file_path,
         new_sample_rate,
         cp.asnumpy(final_channels),
-        audio_format=target_format
+        audio_format=target_format,
+        normalize=toggle_normalize,
+        reference_amplitude=audio.max_possible_amplitude,
     )
     logger.info(
         "Saved processed %s file at %s",

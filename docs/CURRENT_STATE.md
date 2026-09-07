@@ -9,11 +9,14 @@ fat_llama/
 ├── .github/
 │   └── workflows/
 │       ├── deploy.yml
+│       ├── issue-branch-resolve.yml
+│       ├── issue-release-comment.yml
 │       └── tests.yml
 ├── docs/
 │   ├── CURRENT_STATE.md
 │   └── images/
-│       └── spectrogram_comparison.png
+│       ├── spectrogram_comparison.png
+│       └── theory.png
 ├── fat_llama/
 │   ├── __init__.py
 │   ├── audio_fattener/
@@ -33,6 +36,8 @@ fat_llama/
 ├── input_test.flac
 └── output_test.flac
 ```
+
+_Note: `.github/workflows/**` files are listed for completeness only — never factblocked or edited by any skill/agent per `.claude/rules/scope-and-safety.md`._
 
 ## analysis.py
 

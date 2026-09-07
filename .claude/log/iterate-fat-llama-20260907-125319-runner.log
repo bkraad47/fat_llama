@@ -1,0 +1,47 @@
+### [12:53:19 UTC] Step 0.1 — mission context
+Input: README.md (full), .claude/rules/project-mission.md, .claude/rules/scope-and-safety.md, .claude/skills/rules/iterate-fat-llama.md
+Action: read all four in full before proceeding.
+Reasoning: per project-mission.md, this skill must carry README's condensed context (mp3->flac via IST on FFT data, CUDA-only, no AI/ML upscaling) into every generate-code dispatch and the docs/changelog/PR steps.
+Output: mission context loaded. Confirmed CI mode is active (ITERATE_FAT_LLAMA_CI_MODE=1, ITERATE_FAT_LLAMA_ISSUE_NUMBER=18) via .claude/skills/rules/iterate-fat-llama.md's "CI / GitHub Actions mode" section -- behavior differences for Steps 0.2, 0.4, and 7 apply.
+
+### [12:53:19 UTC] Step 0.2 — uncommitted changes check
+Input: git status
+Action: ran git status.
+Reasoning: CI mode expects a fresh checkout; must verify before proceeding.
+Output: clean working tree, nothing to commit. Branch up to date with origin/Issue-no-18-suggestions-floating-point-dequantize-fixes.
+
+### [12:53:19 UTC] Step 0.3 — record starting state
+Input: git branch --show-current, git rev-parse HEAD
+Action: recorded BASE_BRANCH and BASE_COMMIT.
+Reasoning: needed as the reference point for rollback and for Step 7's push target.
+Output: BASE_BRANCH=Issue-no-18-suggestions-floating-point-dequantize-fixes, BASE_COMMIT=482d058277d0effcc4a87a1614d6a7cced1e4935
+
+### [12:53:19 UTC] Step 0.4 — isolation decision
+Input: BASE_BRANCH=Issue-no-18-suggestions-floating-point-dequantize-fixes (an issue-linked branch checked out by issue-branch-resolve.yml)
+Action: per CI-mode rule 2 (and the common-case Naming convention), stay on BASE_BRANCH directly -- no isolated iterate-fat-llama/<timestamp> branch created.
+Reasoning: this branch is already single-purpose and disposable; a second branch would only add confusing proliferation.
+Output: operating directly on Issue-no-18-suggestions-floating-point-dequantize-fixes.
+
+### [12:53:19 UTC] Step 0.5 — tag starting state
+Action: git tag Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-0 (candidate C_0 = BASE_COMMIT).
+Output: tag created successfully -- Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-0. C_0 established.
+
+### [12:54:00 UTC] DIRECTIVES recorded
+Input: skill args (CI mode: clean_problem_statement from triage-issue for issue #18)
+Action: stored verbatim as DIRECTIVES for reuse unmodified across all cycles.
+Output: DIRECTIVES = "Issue contains technical suggestions for improving MP3->FLAC upscaling quality within fat_llama's DSP approach: (1) use 64-bit floating-point precision throughout internal computation and output for better fidelity; (2) make normalization optional rather than mandatory, to preserve original signal levels; (3) apply FFmpeg's -drc_scale 0 parameter when decoding MP3 sources to avoid dynamic range compression; (4) investigate audio dequantization methods and academic papers (e.g., sparse Fourier methods, audio dequantization literature) to enhance IST/FFT approach; (5) study commercial tools' methods (iZotope Spectral Recovery, Stereotool Delossifier) for algorithmic inspiration. Comments also reference other audio projects and suggest ML-based enhancement approaches (GANs, transformers) which are out of scope." Noted: item 5 (commercial tool inspiration) is research-only, not directly actionable as code; ML-based suggestions explicitly out of scope per project mission -- will not be implemented. Items 1-3 are concrete, in-scope DSP/precision/config changes. Item 4 is a research prompt to consider alongside the existing IST approach, not a mandate to add new dependencies.
+
+### [12:55:00 UTC] Cycle 1a — review-current-state
+Input: candidate C_0 (starting state, tag Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-0)
+Action: dispatched review-current-state skill. Log: .claude/log/review-current-state-20260907-125500-runner.log
+Output: docs/CURRENT_STATE.md confirmed up to date (verified via git diff that no factblocked source changed since the last regeneration at commit c6c4b06; only the file tree section needed a small correction for newer non-source files).
+
+### [12:55:xx UTC] Cycle 1b — test-fat-llama
+Input: candidate C_0
+Action: dispatched test-fat-llama skill. Coordinator log: .claude/log/test-fat-llama-20260907-125445-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260907-125502-runner.log, .claude/log/audio-quality-checker-20260907-125508-runner.log.
+Output: 15 code tests (4 pass, 11 skip -- no local GPU), quality=[]. 15 audio_quality tests: 12 pass, 3 fail -- (1) test_ist_harmonic_injection_bounded_across_iterations' comment/bound is stale after cycle-4-of-issue-#20 removed the harmonic term it guards; (2) no stereo end-to-end pipeline coverage; (3) no non-mp3 source-format coverage. coherence=9, spectral_deviation=9.9. score_1 = 12/15 = 0.8. Remote GPU job 479615275eed4476894c142f12c59ffd; local HEAD fast-forwarded 482d058 -> 52a2ab9 (empty commit, byte-identical output_test.flac already committed).
+
+### [12:56:xx UTC] Cycle 1c — early-stop check
+Input: score_1 = 0.8 (not 1.0). Satisfactory-results condition: (1) no code bugs -- true (0 fail among type "code", 11 skips are environmental GPU absence not bugs); (2) coherence > 8.5 -- true (9); (3) spectral deviation > 9.0 -- true (9.9); (4) DIRECTIVES satisfied -- FALSE: this is candidate C_0, the untouched starting state -- none of DIRECTIVES' items (64-bit float precision throughout, optional normalization, ffmpeg -drc_scale 0, dequantization-method investigation) have been addressed yet.
+Action: no early stop (condition 4 fails). Proceeding to fix dispatch for cycle 1.
+Output: running score table: (1, 0.8) C_0.

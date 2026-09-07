@@ -7,6 +7,7 @@ from unittest import mock
 import cupy as cp
 import numpy as np
 import soundfile as sf
+from mutagen.flac import FLAC
 
 from fat_llama.audio_fattener import feed as feed_module
 from fat_llama.audio_fattener.feed import (
@@ -108,6 +109,32 @@ class TestAudioFattener(unittest.TestCase):
             # trip.
             self.assertEqual(info.samplerate, sample_rate)
             self.assertEqual(info.channels, audio.channels)
+            # The written container must actually be the 24-bit FLAC
+            # write_audio() documents/requests (subtype='PCM_24'). Bit depth
+            # is the one thing this MP3 -> FLAC step genuinely upscales
+            # (fat_llama adds precision/headroom, not bandwidth), so a
+            # silent regression to PCM_16 -- or to a FLAC-in-name-only
+            # container -- would go unnoticed by every other assertion
+            # here, all of which operate on soundfile's float view of the
+            # samples and are indifferent to the stored bit depth.
+            self.assertEqual(
+                info.format, 'FLAC',
+                "write_audio(audio_format='flac') did not produce a FLAC "
+                f"container (got {info.format})."
+            )
+            self.assertEqual(
+                info.subtype, 'PCM_24',
+                "write_audio(audio_format='flac') did not write 24-bit PCM "
+                f"(got {info.subtype}); bit-depth headroom is the "
+                "precision upscale this path is meant to deliver."
+            )
+            flac_info = FLAC(output_file)
+            self.assertEqual(
+                flac_info.info.bits_per_sample, 24,
+                "FLAC metadata reports "
+                f"{flac_info.info.bits_per_sample} bits per sample rather "
+                "than the 24 write_audio() requests."
+            )
             # Duration must match the ~1 second input within a small
             # tolerance.
             self.assertAlmostEqual(
@@ -162,6 +189,131 @@ class TestAudioFattener(unittest.TestCase):
                 "full scale; write_audio() likely wrote un-normalized/"
                 "out-of-range data directly with an integer subtype "
                 "instead of scaling it to [-1, 1] first."
+            )
+        finally:
+            if os.path.exists(output_file):
+                os.remove(output_file)
+
+    def test_write_audio_normalize_false_preserves_relative_level(self):
+        # Regression test for Issue #18 item (2): toggle_normalize is
+        # documented ("Whether to normalize the audio") as an optional
+        # pipeline stage, but write_audio() used to unconditionally
+        # peak-normalize (divide by the buffer's own max abs value) no
+        # matter what upstream toggle_normalize did -- so the final
+        # written file's peak amplitude always landed at exactly 1.0
+        # (0 dBFS) regardless of the toggle. Pure-numpy, no GPU needed:
+        # write_audio() itself only ever receives plain np.ndarray data.
+        sample_rate = 44100
+        n = 4410
+        t = np.arange(n) / sample_rate
+        # A "quiet" raw-PCM-scale tone: peak well below a 16-bit source's
+        # own full-scale reference (32768.0), the same relationship
+        # upscale()'s pipeline produces when toggle_autoscale=True rescales
+        # a channel back to its original (non-full-scale) peak and
+        # toggle_normalize=False skips the subsequent peak-normalize step.
+        reference_amplitude = 32768.0
+        original_peak = 8192.0
+        data = original_peak * np.sin(2 * np.pi * 440 * t)
+
+        normalized_file = 'test_output_normalize_true.flac'
+        preserved_file = 'test_output_normalize_false.flac'
+        try:
+            write_audio(
+                normalized_file, sample_rate, data.copy(),
+                audio_format='flac', normalize=True
+            )
+            write_audio(
+                preserved_file, sample_rate, data.copy(),
+                audio_format='flac', normalize=False,
+                reference_amplitude=reference_amplitude
+            )
+
+            normalized_data, _ = sf.read(normalized_file)
+            preserved_data, _ = sf.read(preserved_file)
+
+            normalized_peak = float(np.max(np.abs(normalized_data)))
+            preserved_peak = float(np.max(np.abs(preserved_data)))
+
+            # normalize=True must keep the pre-existing behavior: the
+            # written peak sits at (essentially) full scale.
+            self.assertAlmostEqual(
+                normalized_peak, 1.0, delta=0.01,
+                msg="normalize=True should still peak-normalize to full "
+                    "scale (pre-existing, backward-compatible behavior)."
+            )
+            # normalize=False must NOT be renormalized to full scale --
+            # it should reflect the original signal's level relative to
+            # reference_amplitude (8192 / 32768 = 0.25), not 1.0.
+            expected_preserved_peak = original_peak / reference_amplitude
+            self.assertAlmostEqual(
+                preserved_peak, expected_preserved_peak, delta=0.01,
+                msg="normalize=False did not preserve the original signal "
+                    "level; write_audio() appears to still be forcing a "
+                    "full-scale peak-normalize regardless of the flag."
+            )
+            self.assertLess(
+                preserved_peak, normalized_peak - 0.1,
+                "normalize=False produced a peak indistinguishable from "
+                "normalize=True's full-scale peak -- toggle_normalize has "
+                "no measurable effect on the written file."
+            )
+        finally:
+            for f in (normalized_file, preserved_file):
+                if os.path.exists(f):
+                    os.remove(f)
+
+    def test_write_audio_wav_uses_64bit_float_and_is_lossless(self):
+        # Regression test for Issue #18 item (1): fat_llama's internal
+        # computation is already float64/complex128 throughout feed.py,
+        # but write_audio() was quantizing every output (both flac and
+        # wav) to 24-bit integer PCM ('PCM_24') -- discarding that
+        # precision at the very last step. FLAC has no true float/double
+        # subtype (libsndfile's FLAC ceiling is PCM_24 -- confirmed via
+        # sf.available_subtypes('FLAC')), so 24-bit is already FLAC's own
+        # real ceiling and stays unchanged (see test_write_audio above).
+        # WAV, however, supports a genuine 64-bit float subtype
+        # ('DOUBLE'), which stores the exact float64 values with no
+        # quantization or clamping at all (verified directly:
+        # sf.write(..., subtype='DOUBLE') round-trips values bit-for-bit,
+        # even ones outside [-1, 1], unlike PCM_24 which clamps).
+        sample_rate = 44100
+        n = 2000
+        t = np.arange(n) / sample_rate
+        reference_amplitude = 32768.0
+        original_peak = 12345.6789
+        data = original_peak * np.sin(2 * np.pi * 300 * t)
+
+        output_file = 'test_output_wav_double.wav'
+        try:
+            write_audio(
+                output_file, sample_rate, data.copy(), audio_format='wav',
+                normalize=False, reference_amplitude=reference_amplitude
+            )
+
+            info = sf.info(output_file)
+            self.assertEqual(
+                info.subtype, 'DOUBLE',
+                "write_audio(audio_format='wav') did not use the 64-bit "
+                f"float 'DOUBLE' subtype (got {info.subtype}); WAV "
+                "supports true 64-bit float and this pipeline computes "
+                "in float64/complex128 throughout, so the final write "
+                "should not quantize to a lower-precision integer subtype."
+            )
+
+            written_data, written_sr = sf.read(output_file, dtype='float64')
+            self.assertEqual(written_sr, sample_rate)
+            # Reconstruct the pre-write signal at write_audio's own scale
+            # (data / reference_amplitude, same convention as the
+            # normalize=False FLAC test above) and confirm the round trip
+            # is lossless to float64 precision, not merely "close" the way
+            # a 24-bit quantization step would be.
+            expected = data / reference_amplitude
+            np.testing.assert_allclose(
+                written_data, expected, rtol=1e-9, atol=1e-12,
+                err_msg="WAV+DOUBLE round trip is not losslessly precise; "
+                        "write_audio() may still be rescaling/quantizing "
+                        "the data instead of writing the true float64 "
+                        "values."
             )
         finally:
             if os.path.exists(output_file):
@@ -937,6 +1089,86 @@ class TestAudioFattener(unittest.TestCase):
         finally:
             if os.path.exists(output_file):
                 os.remove(output_file)
+
+    @requires_gpu
+    def test_upscale_toggle_normalize_false_preserves_output_level(self):
+        # Regression test for Issue #18 item (2), wired end to end through
+        # the real upscale() pipeline (not just write_audio() in
+        # isolation): before the fix, write_audio() unconditionally
+        # peak-normalized before writing regardless of toggle_normalize,
+        # so a toggle_normalize=False run's final output peak was
+        # indistinguishable from a toggle_normalize=True run's (both
+        # landed at ~1.0 / 0 dBFS). Verified indirectly in this sandbox
+        # (no functional CUDA device) via a numpy-backed cupy shim running
+        # this exact unmodified source end to end: toggle_normalize=True
+        # -> peak 1.0; toggle_normalize=False -> peak ~0.095 for a source
+        # attenuated 20 dB below full scale, i.e. genuinely reflecting the
+        # source's own relative level instead of being renormalized to
+        # full scale.
+        #
+        # self.test_mp3_file (the shared per-test fixture) is generated at
+        # pydub's default volume, which is already near full scale (peak
+        # 32766 of a possible 32768) -- autoscale would put a
+        # toggle_normalize=False run's output level near full scale too
+        # purely because the *source* already is, making the "preserved
+        # vs. renormalized to full scale" distinction unobservable. A
+        # deliberately quieter (-20 dBFS) fixture makes it observable.
+        from pydub.generators import Sine
+        quiet_mp3_file = 'test_input_quiet.mp3'
+        quiet_sine = Sine(440).to_audio_segment(duration=1000, volume=-20.0)
+        out_handle = quiet_sine.export(quiet_mp3_file, format='mp3')
+        out_handle.close()
+
+        common_kwargs = dict(
+            input_file_path=quiet_mp3_file,
+            source_format='mp3',
+            target_format='wav',
+            max_iterations=2,
+            threshold_value=0.6,
+            target_bitrate_kbps=800,
+            toggle_autoscale=True,
+            toggle_adaptive_filter=False,
+        )
+        normalized_file = 'test_output_toggle_normalize_true.wav'
+        preserved_file = 'test_output_toggle_normalize_false.wav'
+        try:
+            upscale(
+                output_file_path=normalized_file, toggle_normalize=True,
+                **common_kwargs
+            )
+            upscale(
+                output_file_path=preserved_file, toggle_normalize=False,
+                **common_kwargs
+            )
+
+            normalized_data, _ = sf.read(normalized_file)
+            preserved_data, _ = sf.read(preserved_file)
+
+            normalized_peak = float(np.max(np.abs(normalized_data)))
+            preserved_peak = float(np.max(np.abs(preserved_data)))
+
+            self.assertAlmostEqual(
+                normalized_peak, 1.0, delta=0.01,
+                msg="toggle_normalize=True should still peak-normalize "
+                    "the final output to full scale (pre-existing, "
+                    "backward-compatible behavior)."
+            )
+            self.assertLess(
+                preserved_peak, normalized_peak - 0.1,
+                "toggle_normalize=False produced a final output peak "
+                "indistinguishable from toggle_normalize=True's -- the "
+                "toggle has no measurable effect on the written file, "
+                "meaning write_audio()'s own forced normalization is "
+                "not respecting it."
+            )
+            self.assertGreater(
+                preserved_peak, 0.0,
+                "toggle_normalize=False produced silence."
+            )
+        finally:
+            for f in (quiet_mp3_file, normalized_file, preserved_file):
+                if os.path.exists(f):
+                    os.remove(f)
 
     @requires_gpu
     def test_target_bitrate_kbps_drives_bounded_realistic_upscale_factor(
