@@ -6,6 +6,9 @@ on:
     types:
       - completed
 
+permissions:
+  contents: write
+
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
@@ -30,3 +33,52 @@ jobs:
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
       run: |
         python -m twine upload dist/*
+
+    - name: Read version and check for an existing release
+      id: version
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION=$(grep -oE "version='[^']+'" setup.py | sed -E "s/version='([^']+)'/\1/")
+        TAG="v${VERSION}"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+        # This job runs on every successful "build" on main, not just version bumps (PyPI
+        # itself already rejects re-uploading an unchanged version above) -- skip cleanly
+        # here too rather than erroring out of gh release create on a duplicate tag.
+        if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Extract this version's CHANGELOG.md entry
+      if: steps.version.outputs.exists == 'false'
+      id: changelog
+      run: |
+        # Top dated entry: from the first "## [" line up to, but not including, the next
+        # "## [" line -- same convention issue-release-comment.yml already uses.
+        CHANGELOG_ENTRY=$(awk '/^## \[/{n++} n==1' CHANGELOG.md 2>/dev/null || true)
+        if [ -z "$CHANGELOG_ENTRY" ]; then
+          CHANGELOG_ENTRY="(no CHANGELOG.md entry found for this release)"
+        fi
+        {
+          echo "notes<<CHANGELOG_EOF"
+          echo "$CHANGELOG_ENTRY"
+          echo "CHANGELOG_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Create GitHub Release
+      if: steps.version.outputs.exists == 'false'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG: ${{ steps.version.outputs.tag }}
+        NOTES: ${{ steps.changelog.outputs.notes }}
+      run: |
+        echo "$NOTES" > /tmp/release_notes.md
+        gh release create "$TAG" \
+          --repo "${{ github.repository }}" \
+          --title "$TAG" \
+          --notes-file /tmp/release_notes.md \
+          dist/*

@@ -28,6 +28,23 @@ jobs:
             exit 0
           fi
 
+          ISSUE_STATE=$(gh issue view "$ISSUE_NUMBER" --json state -q .state 2>/dev/null || echo "UNKNOWN")
+          if [ "$ISSUE_STATE" = "CLOSED" ]; then
+            echo "Issue #$ISSUE_NUMBER is already closed — skipping (branch '$BRANCH_NAME' is a stale/duplicate trigger)."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          OTHER_BRANCH=$(gh api "repos/${{ github.repository }}/branches" --paginate -q '.[].name' \
+            | grep -v "^${BRANCH_NAME}$" \
+            | grep -iE "issue[-_]?(no[-_]?)?0*${ISSUE_NUMBER}([^0-9]|$)" \
+            | head -n1 || true)
+          if [ -n "$OTHER_BRANCH" ]; then
+            echo "Issue #$ISSUE_NUMBER already has branch '$OTHER_BRANCH' — skipping duplicate branch '$BRANCH_NAME'."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           echo "Resolving issue #$ISSUE_NUMBER on branch $BRANCH_NAME"
           echo "proceed=true" >> "$GITHUB_OUTPUT"
           echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
