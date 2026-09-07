@@ -27,5 +27,5 @@
           "Write(.claude/log/**)"
         ]    
   },
-  "fallbackModel": "opus"
+  "fallbackModel": ["opus"]
 }
