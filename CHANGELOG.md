@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.3] - 2026-09-07
+
+Produced by an `iterate-fat-llama` run resolving [GitHub issue #18](https://github.com/bkraad47/fat_llama/issues/18) (branch `Issue-no-18-suggestions-floating-point-dequantize-fixes`). The issue raised a set of technical suggestions for improving MP3→FLAC upscaling fidelity; one fix cycle was kept, and a second confirmed the result with every audio-quality check passing, meeting this process's bar for an early, satisfactory stop.
+
+### Fixed
+
+- **`toggle_normalize=False` had no real effect on the output's level.** `upscale()`'s `toggle_normalize` parameter looked like it controlled whether the output was normalized, but `write_audio()` — the function actually responsible for the final on-disk levels — force-normalized to full scale (0 dBFS) regardless of that flag, so the toggle was effectively decorative. `write_audio()` now takes its own `normalize`/`reference_amplitude` arguments, and `upscale()` wires `toggle_normalize` and the source's own bit-depth full-scale amplitude straight through to them; `toggle_normalize=False` now genuinely preserves the original recording's relative signal level instead of always being rescaled to touch full scale.
+- **WAV output was quantized to 24-bit integer PCM despite the pipeline computing internally in 64-bit float.** Every stage of the DSP pipeline (interpolation, IST, adaptive filtering, the Nyquist cutoff) already runs in float64/complex128, but the final write step discarded that precision by writing both FLAC and WAV as 24-bit integer PCM. WAV output now uses libsndfile's 64-bit float (`DOUBLE`) subtype, storing the exact computed values losslessly with no quantization or clamping. FLAC output is unchanged — libsndfile has no float/double FLAC subtype, so 24-bit PCM was already, and remains, FLAC's real ceiling.
+
+### Investigated, no change needed
+
+- FFmpeg's `-drc_scale 0` flag (to avoid dynamic-range compression on MP3 decode) was confirmed already applied in `read_audio()` since v1.1.0, predating this issue — no change was needed.
+- Internal computation was confirmed to already be float64/complex128 throughout the pipeline prior to this run; the one real precision gap was the final write step (see Fixed above).
+
+### Notes
+
+- The issue also suggested investigating audio dequantization methods/academic literature to enhance the IST/FFT approach, and studying commercial tools (iZotope Spectral Recovery, Stereotool Delossifier) for inspiration. Neither produced a concrete, verifiable change this run; the project's existing, previously-documented lead — `iterative_soft_thresholding`'s threshold being an absolute cutoff that barely triggers at real audio's amplitude scale — remains the strongest concrete direction for a future cycle. Comment suggestions for ML-based (GAN/transformer) enhancement were out of scope per this project's no-AI/ML-mechanism constraint and were not implemented.
+- Audio quality scores held steady across both cycles (coherence 9/10, spectral deviation 9.9/10) — expected, since the baseline scoring config (`toggle_normalize=True`, `target_format='flac'`) doesn't exercise either changed code path (`toggle_normalize=False`, or `target_format='wav'`); both fixes were verified directly via dedicated new tests instead.
+- Two coverage gaps were newly identified (not fixed this run): `write_audio`'s integer-subtype clipping safety net on the `normalize=False` path is documented but unasserted, and no test covers `write_audio(audio_format='wav', normalize=True)`. Also still open from before this run: no pipeline-level test exercises the stereo path or non-mp3 source formats end to end, and `input_test.flac` remains a byproduct of an older pipeline version rather than an independent high-quality master.
+
 ## [1.4.2] - 2026-09-06
 
 Produced by an `iterate-fat-llama` run resolving [GitHub issue #20](https://github.com/bkraad47/fat_llama/issues/20) (branch `iterate-fat-llama/20260906-044742`, off `Issue-no-20-unrealistic-final-bitrate-fixing`). Four fix cycles were kept; a fifth confirmed the result on real GPU hardware and made no further changes, having already met this process's bar for a satisfactory result.

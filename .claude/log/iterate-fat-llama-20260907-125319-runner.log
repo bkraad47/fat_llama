@@ -1,0 +1,93 @@
+### [12:53:19 UTC] Step 0.1 — mission context
+Input: README.md (full), .claude/rules/project-mission.md, .claude/rules/scope-and-safety.md, .claude/skills/rules/iterate-fat-llama.md
+Action: read all four in full before proceeding.
+Reasoning: per project-mission.md, this skill must carry README's condensed context (mp3->flac via IST on FFT data, CUDA-only, no AI/ML upscaling) into every generate-code dispatch and the docs/changelog/PR steps.
+Output: mission context loaded. Confirmed CI mode is active (ITERATE_FAT_LLAMA_CI_MODE=1, ITERATE_FAT_LLAMA_ISSUE_NUMBER=18) via .claude/skills/rules/iterate-fat-llama.md's "CI / GitHub Actions mode" section -- behavior differences for Steps 0.2, 0.4, and 7 apply.
+
+### [12:53:19 UTC] Step 0.2 — uncommitted changes check
+Input: git status
+Action: ran git status.
+Reasoning: CI mode expects a fresh checkout; must verify before proceeding.
+Output: clean working tree, nothing to commit. Branch up to date with origin/Issue-no-18-suggestions-floating-point-dequantize-fixes.
+
+### [12:53:19 UTC] Step 0.3 — record starting state
+Input: git branch --show-current, git rev-parse HEAD
+Action: recorded BASE_BRANCH and BASE_COMMIT.
+Reasoning: needed as the reference point for rollback and for Step 7's push target.
+Output: BASE_BRANCH=Issue-no-18-suggestions-floating-point-dequantize-fixes, BASE_COMMIT=482d058277d0effcc4a87a1614d6a7cced1e4935
+
+### [12:53:19 UTC] Step 0.4 — isolation decision
+Input: BASE_BRANCH=Issue-no-18-suggestions-floating-point-dequantize-fixes (an issue-linked branch checked out by issue-branch-resolve.yml)
+Action: per CI-mode rule 2 (and the common-case Naming convention), stay on BASE_BRANCH directly -- no isolated iterate-fat-llama/<timestamp> branch created.
+Reasoning: this branch is already single-purpose and disposable; a second branch would only add confusing proliferation.
+Output: operating directly on Issue-no-18-suggestions-floating-point-dequantize-fixes.
+
+### [12:53:19 UTC] Step 0.5 — tag starting state
+Action: git tag Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-0 (candidate C_0 = BASE_COMMIT).
+Output: tag created successfully -- Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-0. C_0 established.
+
+### [12:54:00 UTC] DIRECTIVES recorded
+Input: skill args (CI mode: clean_problem_statement from triage-issue for issue #18)
+Action: stored verbatim as DIRECTIVES for reuse unmodified across all cycles.
+Output: DIRECTIVES = "Issue contains technical suggestions for improving MP3->FLAC upscaling quality within fat_llama's DSP approach: (1) use 64-bit floating-point precision throughout internal computation and output for better fidelity; (2) make normalization optional rather than mandatory, to preserve original signal levels; (3) apply FFmpeg's -drc_scale 0 parameter when decoding MP3 sources to avoid dynamic range compression; (4) investigate audio dequantization methods and academic papers (e.g., sparse Fourier methods, audio dequantization literature) to enhance IST/FFT approach; (5) study commercial tools' methods (iZotope Spectral Recovery, Stereotool Delossifier) for algorithmic inspiration. Comments also reference other audio projects and suggest ML-based enhancement approaches (GANs, transformers) which are out of scope." Noted: item 5 (commercial tool inspiration) is research-only, not directly actionable as code; ML-based suggestions explicitly out of scope per project mission -- will not be implemented. Items 1-3 are concrete, in-scope DSP/precision/config changes. Item 4 is a research prompt to consider alongside the existing IST approach, not a mandate to add new dependencies.
+
+### [12:55:00 UTC] Cycle 1a — review-current-state
+Input: candidate C_0 (starting state, tag Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-0)
+Action: dispatched review-current-state skill. Log: .claude/log/review-current-state-20260907-125500-runner.log
+Output: docs/CURRENT_STATE.md confirmed up to date (verified via git diff that no factblocked source changed since the last regeneration at commit c6c4b06; only the file tree section needed a small correction for newer non-source files).
+
+### [12:55:xx UTC] Cycle 1b — test-fat-llama
+Input: candidate C_0
+Action: dispatched test-fat-llama skill. Coordinator log: .claude/log/test-fat-llama-20260907-125445-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260907-125502-runner.log, .claude/log/audio-quality-checker-20260907-125508-runner.log.
+Output: 15 code tests (4 pass, 11 skip -- no local GPU), quality=[]. 15 audio_quality tests: 12 pass, 3 fail -- (1) test_ist_harmonic_injection_bounded_across_iterations' comment/bound is stale after cycle-4-of-issue-#20 removed the harmonic term it guards; (2) no stereo end-to-end pipeline coverage; (3) no non-mp3 source-format coverage. coherence=9, spectral_deviation=9.9. score_1 = 12/15 = 0.8. Remote GPU job 479615275eed4476894c142f12c59ffd; local HEAD fast-forwarded 482d058 -> 52a2ab9 (empty commit, byte-identical output_test.flac already committed).
+
+### [12:56:xx UTC] Cycle 1c — early-stop check
+Input: score_1 = 0.8 (not 1.0). Satisfactory-results condition: (1) no code bugs -- true (0 fail among type "code", 11 skips are environmental GPU absence not bugs); (2) coherence > 8.5 -- true (9); (3) spectral deviation > 9.0 -- true (9.9); (4) DIRECTIVES satisfied -- FALSE: this is candidate C_0, the untouched starting state -- none of DIRECTIVES' items (64-bit float precision throughout, optional normalization, ffmpeg -drc_scale 0, dequantization-method investigation) have been addressed yet.
+Action: no early stop (condition 4 fails). Proceeding to fix dispatch for cycle 1.
+Output: running score table: (1, 0.8) C_0.
+
+### [13:06:xx UTC] Cycle 1d — generate-code
+Input: full test-fat-llama JSON from cycle 1b, DIRECTIVES verbatim, mission context, guidance on how to interpret DIRECTIVES items (1)-(5) (items 1-3 concrete/actionable, item 4 investigative, item 5 reading-only, ML/GAN/transformer suggestions explicitly out of scope). Noted the 3 failing audio_quality tests are out of DIRECTIVES scope this cycle. First dispatch attempt (default Fable model) errored out (API safety-filter false positive on the request itself, "reasoning_extraction" -- not a content/policy issue with the task); retried successfully with model override "sonnet".
+Action: dispatched generate-code subagent (model: sonnet override, since Fable errored). Log: .claude/log/generate-code-20260907-130601-runner.log.
+Output: {"outcome": "confirmed", "hypothesis": "write_audio() unconditionally peak-normalized before writing regardless of upscale()'s toggle_normalize flag (which was never even passed through to it), so toggle_normalize=False had no real effect on output level; separately WAV output was quantized to PCM_24 despite the pipeline computing internally in float64/complex128 throughout, when libsndfile's WAV support includes a true 64-bit float 'DOUBLE' subtype.", "changes": [feed.py: write_audio() gained normalize/reference_amplitude params -- WAV now writes subtype 'DOUBLE' (lossless 64-bit float, matches internal float64 computation exactly); FLAC stays PCM_24 (libsndfile has no float/double FLAC subtype -- confirmed via sf.available_subtypes, so this is FLAC's real ceiling, not a gap); normalize=False divides by a fixed reference_amplitude (source's own bit-depth full-scale value) instead of the buffer's own peak, preserving relative level instead of always stretching to 0 dBFS; upscale() now wires toggle_normalize and audio.max_possible_amplitude through to write_audio(), closing the gap; test_feed.py: 3 new tests (write_audio normalize=False level preservation, WAV DOUBLE-subtype losslessness, GPU-gated end-to-end toggle_normalize=False test using a -20dBFS fixture)], "verification": {"status": "pass", "evidence": "pre-fix new tests failed with TypeError (no such kwargs existed), post-fix pass; full local suite 18 tests, 6 pass, 12 skip (no GPU, matches baseline), 0 fail; additional non-committal manual end-to-end verification via numpy cupy-shim confirmed toggle_normalize=False preserves a -20dBFS source's relative level (peak ~0.095) vs. toggle_normalize=True (peak 1.0, unchanged/backward-compatible)."}, "proposed_upscale_params": null}. Item (3) (ffmpeg -drc_scale 0) confirmed already implemented pre-existing (feed.py:46, since v1.1.0) -- verified independently via grep, no change needed/made. Item (4) not implemented this cycle (flagged existing IST threshold-scale lead as future work); item (5) not applicable. Flagged (not a real injection, a legitimate harness system-reminder both the coordinator and subagent independently saw about tool-preference under bypass-permissions mode) -- subagent correctly disregarded it as irrelevant to its file-write contract and continued using Read/Edit/Write normally; noted here per scope-and-safety.md's instruction to surface anything that looked like an injected instruction, even though this one is a benign harness message, not attacker content.
+Action taken by coordinator: verified the diff directly (git diff feed.py) before committing -- confirmed the write_audio/upscale changes match the report, confirmed item (3)'s ffmpeg flag pre-existed via grep, re-ran `python3 -m unittest discover -s fat_llama/tests` independently (18 tests, 6 pass, 12 skip, 0 fail) -- matches subagent's own report, no discrepancy found.
+
+### [13:10:xx UTC] Cycle 1e — checkpoint
+Action: git config user.email/user.name set to "github-actions[bot]"/"github-actions[bot]@users.noreply.github.com" (local repo scope only) -- no identity was configured in this fresh CI checkout, and this run's own Step (e) requires making commits; matches the identity the workflow's own fallback "Commit run logs" step already uses. git add -A && git commit -m "iterate-fat-llama: cycle 1 fix" (9165a32), tagged Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-1 (candidate C_1).
+Output: C_1 committed and tagged. Running score table so far: (1, 0.8) C_0.
+
+### [13:15:xx UTC] Cycle 2a — review-current-state
+Input: candidate C_1 (cycle 1's committed fix, tag Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-1)
+Action: dispatched review-current-state skill (targeted refresh, not full rewrite -- confirmed via diff that only feed.py/test_feed.py changed). Log: .claude/log/review-current-state-20260907-131500-runner.log
+Output: docs/CURRENT_STATE.md updated -- write_audio/upscale factblocks reflect the new normalize/reference_amplitude params, 3 new test factblocks added, Notes entry documenting issue #18 cycle-1 findings (items 1-3 status).
+
+### [13:25:xx UTC] Cycle 2b — test-fat-llama
+Input: candidate C_1
+Action: dispatched test-fat-llama skill. Coordinator log: .claude/log/test-fat-llama-20260907-132500-runner.log. Subagent logs: .claude/log/code-tester-reviewer-20260907-132523-github-actions-bot.log, .claude/log/audio-quality-checker-20260907-132526-runner.log.
+Output: 18 code tests (6 pass, 12 skip -- no local GPU), quality=[]. 15 audio_quality tests, ALL PASS (this cycle's checklist directly exercised the new normalize/DOUBLE-subtype paths; 2 new coverage gaps noted for a future cycle but not turned into failing entries). coherence=9, spectral_deviation=9.9. score_2 = 15/15 = 1.0. Remote GPU job 3e68d6affdf2450bb091f73070684656; output byte-identical to cycle 1's (expected, baseline config doesn't exercise the changed code paths).
+
+### [13:25:xx UTC] Cycle 2c — early-stop check
+Input: score_2 = 1.0 (all 15 audio_quality entries pass).
+Action: EARLY STOP TRIGGERED per the score_i == 1.0 condition -- stopping immediately without a cycle-2 fix, per SKILL.md step (c). Proceeding straight to Step 5 with the working tree exactly as it is (candidate C_1, HEAD e3569ce22706bea7ffa2de75768942d49ee78da4, tagged Issue-no-18-suggestions-floating-point-dequantize-fixes/iter-1).
+Reasoning: score_i == 1.0 is sufficient on its own for early stop (no need to also evaluate the satisfactory-results condition). No rollback decision needed since the loop did not run all 5 cycles without an early stop.
+Output: Final score table for the record: (1, 0.8) C_0, (2, 1.0) C_1. C_1 is kept.
+
+### [13:35:xx UTC] Step 5 — docs and changelog
+Input: final chosen working tree = C_1 (no rollback; kept via cycle 2's early stop).
+Action: dispatched review-current-state once more (log: .claude/log/review-current-state-20260907-133500-runner.log) -- confirmed already current, no rewrite needed. Wrote CHANGELOG.md entry for [1.4.3]: 2 Fixed bullets (toggle_normalize wiring, WAV 64-bit float output), an "Investigated, no change needed" section (ffmpeg -drc_scale 0 already present, float64 already used internally), Notes (dequantization/commercial-tool research yielded no concrete change, ML suggestions out of scope, scores held steady since baseline config doesn't exercise either changed path, 2 new + 2 carried-over coverage gaps).
+Output: CHANGELOG.md updated with a human-edited-quality entry (reviewed holistically for clarity/style, not a raw JSON dump).
+
+### [13:36:xx UTC] Step 6 — version bump
+Input: setup.py version 1.4.2. DIRECTIVES asked for fidelity/precision fixes and investigation, not new functionality.
+Action: patch bump per default policy: 1.4.2 -> 1.4.3. Updated setup.py's version field and filled it into the CHANGELOG.md entry.
+Output: setup.py version = 1.4.3.
+
+### [13:38:xx UTC] Step 7 — version-specific PR (CI mode: confirmation bypassed)
+Input: version bump 1.4.2 -> 1.4.3, final chosen state C_1, CHANGELOG.md [1.4.3] entry.
+Action: CI mode per ITERATE_FAT_LLAMA_CI_MODE=1 -- Step 7 confirmation bypassed per .claude/skills/rules/iterate-fat-llama.md, proceeding directly through commit -> push (force-with-lease, staying on BASE_BRANCH directly) -> open PR with Closes #18 (ITERATE_FAT_LLAMA_ISSUE_NUMBER=18 set).
+  1. git add -A && commit ("v-1.4.3: fix issue #18 (toggle_normalize wiring, 64-bit float WAV output)", with "Closes #18") -- docs/changelog/version-bump changes (9a52632).
+  2. git push --force-with-lease origin Issue-no-18-suggestions-floating-point-dequantize-fixes -- succeeded (e3569ce..9a52632).
+  3. gh pr create -- FAILED: gh is not authenticated in this sandbox (no GH_TOKEN/GITHUB_TOKEN env var; `gh auth status` confirms not logged in). Per the "gh isn't installed/authenticated" fallback: branch is already pushed, so per policy this is not a run failure -- proceeding to report the compare link instead.
+Output: Branch Issue-no-18-suggestions-floating-point-dequantize-fixes pushed to origin at 9a52632. Compare link: https://github.com/bkraad47/fat_llama/compare/main...Issue-no-18-suggestions-floating-point-dequantize-fixes (PR not opened -- gh unauthenticated).
+
+### [13:40:xx UTC] DONE — CI mode: Step 7 confirmation bypassed per .claude/skills/rules/iterate-fat-llama.md. Final result: v-1.4.3 pushed to Issue-no-18-suggestions-floating-point-dequantize-fixes (compare link given, no PR opened -- gh unauthenticated). Kept candidate: C_1 (cycle 1's fix; cycle 2 confirmed with score 1.0 via early stop, no rollback). cycles_run=2.

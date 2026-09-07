@@ -1,0 +1,67 @@
+# audio-quality-checker run log
+# invocation-time: 20260907-132526 UTC
+# branch: Issue-no-18-suggestions-floating-point-dequantize-fixes
+# HEAD at start: 9165a32061f0a5a2d0aa2aaeb883e5091c8ecc51 (iterate-fat-llama: cycle 1 fix, candidate C_1)
+
+### [13:25:26 UTC] Step 0 — Setup / environment probe
+Input: Dispatch prompt (candidate C_1, no proposed_upscale_params -> baseline config). Rules read: .claude/agents/rules/audio-quality.md, .claude/rules/scope-and-safety.md.
+Action: Opened log. Ran `git status --porcelain`, `git rev-parse HEAD`, `nvidia-smi`, cupy device-count probe.
+Reasoning: Need to know (a) whether the tree matches a committed SHA the remote GPU can check out, and (b) whether a local GPU fallback even exists.
+Output: HEAD=9165a32061f0a5a2d0aa2aaeb883e5091c8ecc51. Working tree clean for all source/test files; only uncommitted paths are docs/CURRENT_STATE.md and two .claude/log/ files (neither affects the upscale pipeline). No local GPU: `nvidia-smi` not found; cupy 14.2.0 imports but getDeviceCount raises cudaErrorInsufficientDriver. => remote GPU path is the only viable route to output_test.flac.
+
+### [13:26:40 UTC] Step 6a — Remote GPU generation dispatched (rules "What to check" step 3)
+Input: baseline/reference config (no proposed_upscale_params in dispatch prompt): input_file_path=input_test.mp3, output_file_path=output_test.flac, source_format=mp3, target_format=flac, max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, toggle_normalize=True, toggle_autoscale=True, toggle_adaptive_filter=True.
+Action: `git push origin HEAD:Issue-no-18-...` (commit 9165a32 already existed locally but was not on the remote; pushing an existing commit is the narrowly-permitted git exception). Then called mcp__fllm-mcp-server__test_generate(branch=Issue-no-18-suggestions-floating-point-dequantize-fixes, commit=9165a32061f0a5a2d0aa2aaeb883e5091c8ecc51, params=<baseline above>).
+Reasoning: Remote-GPU-first is mandated; local fallback is impossible here (no CUDA driver). test_generate validates the SHA against GitHub, so the commit had to be on the remote first.
+Output: {"job_id":"3e68d6affdf2450bb091f73070684656","status":"queued"}
+
+### [13:30:05 UTC] Step 1 — Exercise read_audio/write_audio on a synthesized sample
+Input: 1s 440 Hz pydub Sine -> /tmp/aqc/synth.mp3 (same fixture pattern as test_feed.py). Script: /tmp/aqc/step1_rw.py (repo path forced onto sys.path -- an older fat_llama is also pip-installed in site-packages and shadowed the working tree at first).
+Action: read_audio(mp3) then write_audio() four ways: flac/wav x normalize=True/False, inspected with soundfile + mutagen.
+Reasoning: Task step 1; also the cheapest direct check of candidate C_1's two changes (toggle_normalize honoring, WAV DOUBLE subtype).
+Output: read_audio: sr=44100, channels=1, samples 1-D len=44100 (1.0000 s), dur=1000 ms, bitrate=63999 bps (in 32k-320k mp3 band), dominant=440.00 Hz, all finite, peak=31212.0, max_possible_amplitude=32768.0.
+  flac normalize=True : FLAC/PCM_24 24-bit, sr=44100, ch=1, dur=1.0000 s, peak=1.000000, clipfrac=4.5e-05, dom=440.00 Hz, corr_with_input=1.000000, real=459.0 kbps.
+  flac normalize=False: FLAC/PCM_24 24-bit, peak=0.952515 == 31212/32768 exactly (level genuinely preserved -- C_1 fix confirmed), clipfrac=0, dom=440.00 Hz, corr=1.000000, real=177.9 kbps (smaller because /32768 leaves the low 8 bits of the 24-bit words zero -> FLAC wasted-bits coding; the original 16-bit ints survive exactly).
+  wav  normalize=True : WAV/DOUBLE (64-bit float -- C_1 fix confirmed), peak=1.000000, dom=440.00 Hz, real=2823.0 kbps (= 64 bits x 44100).
+  wav  normalize=False: WAV/DOUBLE, peak=0.952515, clipfrac=0, corr=1.000000.
+  All four: sample rate, channel count and duration preserved exactly; no NaN/Inf.
+
+### [13:30:20 UTC] Step 2/4 — Test suite run + test-coherence review
+Input: fat_llama/tests/test_feed.py (1303 lines, 18 tests).
+Action: `python -m unittest fat_llama.tests.test_feed -v` from the repo root; read every test's assertions.
+Reasoning: Task steps 2 and 4 -- confirm tests actually assert on audio content, and that they pass on candidate C_1.
+Output: OK (18 ran, 6 passed, 12 skipped -- all skips are the @requires_gpu ones, expected in this GPU-less sandbox). No test is a bare existence/non-empty check: every write/upscale test additionally asserts container format+subtype, sample rate, channel count, duration, finiteness, non-silence, clipping fraction, waveform correlation and/or dominant frequency. No assertion edits were needed; two coverage gaps noted for generate-code (integer-subtype clipping safety net on the normalize=False FLAC path; no wav+normalize=True case).
+
+### [13:35:10 UTC] Step 6 — Remote GPU job completion + output retrieval
+Input: job_id 3e68d6affdf2450bb091f73070684656.
+Action: Polled get_test_generate_status (4 polls, spaced; ~9 min total). On terminal state, checked push_status before anything else, then `git fetch` + `git merge --ff-only e3569ce...`.
+Reasoning: Rules mandate checking push_status independently of job status. Deviation note: the rules suggest `git checkout`/`reset --hard` to result_commit_sha; I used `git merge --ff-only` instead because e3569ce is a verified direct descendant of HEAD (checked with `git merge-base --is-ancestor`) and a hard reset would have destroyed another agent's uncommitted work in the tree (docs/CURRENT_STATE.md and .claude/log/iterate-fat-llama-20260907-125319-runner.log). The ff-only merge lands the branch on exactly result_commit_sha with the same result for output_test.flac.
+Output: status=succeeded, stage=done, push_status=succeeded, result_commit_sha=e3569ce22706bea7ffa2de75768942d49ee78da4. Worker log confirms the real pipeline ran: "Original MP3 bitrate: 192.00 kbps / Upscale factor set to: 4 / Stereo channels detected / Interpolating + IST x2 channels / Auto-scaling / Normalizing / Applying adaptive filtering / Applying final Nyquist cutoff at 22050.0 Hz / Saved processed FLAC file at output_test.flac". Local HEAD now e3569ce; output_test.flac md5=7ac5a0753c4fafb9c817d26693d8e200, FLAC/PCM_24, 176400 Hz, 2 ch, 15.1373 s. `git diff --stat 9165a32 e3569ce` is empty -> this run's output is byte-identical to the previous cycle's committed output, which is the expected result of candidate C_1 (its two changes only affect toggle_normalize=False and target_format='wav', neither exercised by the baseline config).
+
+### [13:36:30 UTC] Step 5/6 — Coherence measurements + spectral deviation score
+Input: input_test.flac (reference, 308700 Hz, 2 ch, 15.1373 s), output_test.flac (176400 Hz), input_test.mp3 (44100 Hz, 192 kbps -> original Nyquist 22050 Hz). Scripts: /tmp/aqc/score.py, /tmp/aqc/extra.py.
+Action: Ran the rules' fixed algorithm (resample_poly 7/4 output -> 308700 Hz, trim to min length, scipy.signal.stft nperseg=2048 noverlap=1024, per-spectrogram max-normalize) plus all Coherence-score checks and two supplementary checks (frame-RMS dynamic range, persistent-tone hunt) targeting the cycle-4 static-drone defect.
+Reasoning: Task steps 5-7; the supplementary checks exist because prior cycles found a constant 98 Hz drone and collapsed quiet-passage dynamic range.
+Output:
+  invalid samples: 0 non-finite.
+  clipping: 0.0129% of samples |x|>0.999 after peak-normalize (raw peak exactly 1.000000, as toggle_normalize=True intends).
+  above-original-Nyquist (22050-88200 Hz, native output rate): peak -176.3 dB rel in-band peak, rms -143.9 dB rel in-band rms -- at/below the FFT noise floor. (Reference input_test.flac itself carries -55.3 dB of legacy artifacts up there; the output does not.)
+  dropouts: 0 near-zero runs >50 ms (so 0 unmatched).
+  discontinuities: 99.9th pct |diff| out=0.0161 vs ref=0.0582 (ratio 0.277); max |diff| out=0.0428 vs ref=0.2522 -- output is smoother than the reference, no click/pop proxy.
+  gain-matched band energy (out vs ref): 0-500 Hz -0.00 dB, 500-2k +0.01, 2k-5k +0.11, 5k-10k +0.37, 10k-14k +1.03, 14k-16k +1.67, 16k-18k +2.24, 18k-20k +2.55, 20k-22.05k +3.32 (both at ~-127 dB, i.e. noise floor). Band-selective HF lift, flat at LF -> not a broadband noise-floor rise; but the one genuinely empty band (20-22.05 kHz) stayed at the noise floor, so no clearly new content there.
+  dynamic range (50 ms frame RMS, p99/p05): ref 30.6 dB vs out 30.7 dB; envelope correlation 1.00000; quietest 5% of frames +0.0 dB vs reference -> the cycle-4 static floor/drone is gone. Persistent-tone hunt (8192-pt STFT, 20-2000 Hz): no bin present in more than 73% of frames, and the top bins are real bass content, not a constant tone.
+  spectral deviation: convergence=0.9839, correlation=0.9999, combined=0.9919 -> score 9.9.
+
+### [13:38:00 UTC] Step 7 — Spectrogram comparison image
+Input: input_test.mp3, input_test.flac, output_test.flac. Script: /tmp/aqc/spectro.py.
+Action: Imported read_mp3/read_flac/normalize from analysis.py (project's own conventions), scipy.signal.spectrogram(nperseg=2048), masked every panel's data above the mp3's own Nyquist (22050 Hz, read from the file, not assumed), 3 stacked panels mp3 -> reference -> output, shared time axis, shared vmin=-120/vmax=0 dB scale, single colorbar.
+Reasoning: Task step 7 / rules "Spectrogram comparison image".
+Output: docs/images/spectrogram_comparison.png written (496879 bytes). Visual: output panel tracks the reference panel closely across the whole band and duration; both preserve the mp3 source's ~16-19 kHz lowpass shelf; no banding, no added noise wash, no content above the capped Nyquist line.
+
+### [13:38:40 UTC] Step 3/8 — Test-assertion fixes considered; final report
+Input: All measurements above.
+Action: No edits made to fat_llama/tests/test_feed.py -- every test already asserts on real audio content (format/subtype/bit depth, sample rate, channel count, duration, finiteness, non-silence, clipping fraction, waveform correlation, dominant frequency, above-Nyquist ratios), so there was no incoherent assertion to fix. Two coverage gaps recorded for generate-code instead (not fixed here, since both need new tests rather than corrected assertions): (a) write_audio's normalize=False integer-subtype clipping safety net (data whose peak exceeds reference_amplitude) is documented but unasserted; (b) no test covers write_audio(audio_format='wav', normalize=True), the other new DOUBLE-subtype branch.
+Reasoning: Fixing philosophy -- strengthen assertions only where a test is incoherent; report rather than expand scope.
+Output: Coherence 9/10, spectral deviation 9.9/10, spectrogram_image docs/images/spectrogram_comparison.png. Final JSON returned to the coordinator.
+
+### [13:38:45 UTC] DONE — Candidate C_1 passes every audio-quality check: coherence 9/10, spectral deviation 9.9/10 (convergence 0.9839, correlation 0.9999), above-Nyquist band at -176.3 dB, no clipping/dropouts/NaN/drone; baseline FLAC output byte-identical to the previous cycle's, as expected for a fix scoped to toggle_normalize=False and WAV output.
