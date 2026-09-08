@@ -17,14 +17,14 @@
           "Write(input_test.flac)",
           "Edit(input_test.mp3)",
           "Write(input_test.mp3)",
-          "Read(.claude/log/**)",
-          "Edit(.claude/log/**)"
+          "Read(.claude/log/**)"
         ],
         "allow": [
           "Bash(python -m pytest fat_llama/tests/test_feed.py -v)",
           "Bash(.venv/Scripts/python.exe -m pytest fat_llama/tests/test_feed.py -v)",
           "Bash(.venv/Scripts/python.exe -m unittest fat_llama.tests.test_feed -v)",
-          "Write(.claude/log/**)"
+          "Write(.claude/log/**)",
+          "Edit(.claude/log/**)"
         ]    
   },
   "fallbackModel": ["opus"]
