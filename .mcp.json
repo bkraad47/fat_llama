@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "fllm-mcp-server": {
+      "type": "http",
+      "url": "${MCP_SERVER}",
+      "headers": {
+        "Authorization": "Bearer ${MCP_SECRET}"
+      }
+    }
+  }
+}

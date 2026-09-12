@@ -1,31 +1,35 @@
 {
   "permissions": {
     "deny": [
-          "Edit(.claude/agents/**)",
-          "Write(.claude/agents/**)",
-          "Edit(.claude/skills/**)",
-          "Write(.claude/skills/**)",
-          "Edit(.claude/rules/**)",
-          "Write(.claude/rules/**)",
-          "Edit(.claude/settings.json)",
-          "Write(.claude/settings.json)",
-          "Edit(.claude/settings.local.json)",
-          "Write(.claude/settings.local.json)",
-          "Edit(.github/workflows/**)",
-          "Write(.github/workflows/**)",
-          "Edit(input_test.flac)",
-          "Write(input_test.flac)",
-          "Edit(input_test.mp3)",
-          "Write(input_test.mp3)",
-          "Read(.claude/log/**)"
-        ],
-        "allow": [
-          "Bash(python -m pytest fat_llama/tests/test_feed.py -v)",
-          "Bash(.venv/Scripts/python.exe -m pytest fat_llama/tests/test_feed.py -v)",
-          "Bash(.venv/Scripts/python.exe -m unittest fat_llama.tests.test_feed -v)",
-          "Write(.claude/log/**)",
-          "Edit(.claude/log/**)"
-        ]    
+      "Edit(.claude/agents/**)",
+      "Write(.claude/agents/**)",
+      "Edit(.claude/skills/**)",
+      "Write(.claude/skills/**)",
+      "Edit(.claude/rules/**)",
+      "Write(.claude/rules/**)",
+      "Edit(.claude/settings.json)",
+      "Write(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)",
+      "Write(.claude/settings.local.json)",
+      "Edit(.github/workflows/**)",
+      "Write(.github/workflows/**)",
+      "Edit(input_test.flac)",
+      "Write(input_test.flac)",
+      "Edit(input_test.mp3)",
+      "Write(input_test.mp3)",
+      "Read(.claude/log/**)",
+      "mcp__fllm-mcp-server__*"
+    ],
+    "allow": [
+      "Bash(python -m pytest fat_llama/tests/test_feed.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest fat_llama/tests/test_feed.py -v)",
+      "Bash(.venv/Scripts/python.exe -m unittest fat_llama.tests.test_feed -v)",
+      "Write(.claude/log/**)",
+      "Edit(.claude/log/**)",
+      "mcp__fllm-mcp-server__test_generate",
+      "mcp__fllm-mcp-server__get_test_generate_status"
+    ]
   },
+  "enabledMcpjsonServers": ["fllm-mcp-server"],
   "fallbackModel": ["opus"]
 }
