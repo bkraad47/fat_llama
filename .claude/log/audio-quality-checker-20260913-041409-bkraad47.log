@@ -1,0 +1,39 @@
+# audio-quality-checker run log
+# invocation-time: 20260913-041409 UTC
+# user: bkraad47
+# branch: v-2.0.0 @ 13e831bc5229dc090a09544ff7eb4541db33b43a
+# dispatch: no proposed_upscale_params -> fixed baseline config (example.py match)
+# context from caller: re-measure added-detail-below-original-Nyquist and in-band
+#   magnitude response vs reference, to test whether cycle 6's
+#   _cap_ist_changes_to_baseline_peak closes the regression (coherence 9.5->8.0,
+#   spectral_deviation 9.9->8.8) seen last run.
+
+### [04:14:09 UTC] Step 0 — Open log / read rules
+Input: dispatch prompt; .claude/agents/rules/audio-quality.md; .claude/rules/scope-and-safety.md
+Action: read both rules files in full; created this log file; captured git branch/commit and working-tree status.
+Reasoning: rules and scope must be loaded before any measurement work.
+Output: branch v-2.0.0, HEAD 13e831bc5229dc090a09544ff7eb4541db33b43a; working tree has ` M docs/CURRENT_STATE.md` plus .claude/log churn; local CUDA GPU present (device count 1).
+
+### [04:16:30 UTC] Step 3/gen — Produce output_test.flac (remote-first decision)
+Input: rules "What to check" step 3 remote-GPU-first procedure; dispatch prompt (no branch/commit supplied); git status.
+Action: evaluated the remote path preconditions. Dispatch prompt supplied no branch/commit SHA to test, AND the working tree carries an uncommitted modification outside my write scope (` M docs/CURRENT_STATE.md`). Per rules step 1a both conditions mandate falling back to local rather than committing/pushing anything myself; did NOT call mcp__fllm-mcp-server__test_generate (avoids billing a GPU speculatively against an unverified commit). Launched the local GPU fallback as a background command: scratchpad/run_baseline.py invoking upscale() with the exact fixed baseline config (max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, all three toggles True), output to repo-root output_test.flac.
+Reasoning: rules step 1a explicitly routes "no clear branch/commit" and "uncommitted changes beyond my write scope" to the local fallback; local CUDA GPU is present so step 3 ("nothing worked") does not apply.
+Output: background job b5ejuevjt started; expected ~20 min.
+
+### [04:22:00 UTC] Step 1 — read_audio/write_audio on synthesized samples
+Input: fat_llama/audio_fattener/feed.py read_audio/write_audio; pydub.generators.Sine samples (mono 440Hz/1000ms, stereo 440/660Hz/1500ms).
+Action: scratchpad/step1_io.py -- round-tripped mono mp3 -> flac, stereo mp3 -> flac, mono mp3 -> wav; inspected with soundfile.info, mutagen.flac.FLAC, and FFT.
+Reasoning: rules "What to check" step 1 (bitrate / sample rate / channels / duration + real content).
+Output: mono read sr=44100, n=44100, ndim=1, channels=1, bitrate=63999 bps, dominant 440.0 Hz, finite, peak 31212 (raw PCM scale). mono write FLAC/PCM_24, 24 bps, sr 44100, ch 1, duration 1.000000 s (input 1.0), stored bitrate 459.9 kbps, peak 1.0, clipped_frac 4.5e-05, dominant 440.0 Hz, corr vs normalized input 0.999999999999999. stereo read shape (66150,2), ch 2, bitrate 127997, dominant L=440.0/R=660.0. stereo write FLAC/PCM_24 ch 2 duration 1.500000 s, 919.7 kbps, peak 1.0, clipped_frac 7.6e-06, dominant L=440.0/R=660.0 (no channel swap/collapse). wav write WAV/DOUBLE sr 44100 ch 1 duration 1.0. All PASS.
+
+### [04:24:00 UTC] Step 2 — Test coherence review (test_feed.py)
+Input: fat_llama/tests/test_feed.py (1848 lines, 21 tests).
+Action: read the whole module; checked each test for content-level assertions vs. mere file-existence/non-emptiness.
+Reasoning: rules "What to check" step 2.
+Output: No test asserts only existence/non-emptiness. Every e2e test checks sample rate, duration, finiteness, non-silence, clipping fraction, and dominant frequency. Two coverage observations recorded for the report (not defects, not edited): (i) test_cap_ist_changes_to_baseline_peak_bounds_peak_without_zeroing_detail's assertion (b) lower bound is very loose (capped peak > 1% of uncapped) and its uniform-scalar check derives the scale from the result itself; (ii) no test measures the actual cycle-6 regression symptom (per-band in-band magnitude vs. an interpolation-only baseline) at the pipeline level -- only combined-channel *peaks*. No assertion edits made.
+
+### [04:25:30 UTC] Step 3/gen(cont) — Local baseline pipeline run finished
+Input: background job b5ejuevjt.
+Action: waited for completion; inspected output_test.flac.
+Reasoning: needed the produced file before scoring.
+Output: SUCCESS in 87.2 s (far below the ~20 min the rules note; the block-adaptive lms_filter rewrite removed the old per-sample bottleneck). upscale_factor=4 from a 192.00 kbps source. output_test.flac: 176400 Hz, 2 ch, PCM_24, 15.1373 s, 1883.7 kbps stored. Reference input_test.flac: 308700 Hz, 2 ch, PCM_24, 15.1373 s. Source input_test.mp3: 44100 Hz, 2 ch, 15.1373 s.

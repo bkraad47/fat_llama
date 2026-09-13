@@ -196,10 +196,24 @@ list(_lms_block_ranges(33, 1000, 256))
 filtered_channel = lms_filter(normalized_channel, normalized_channel)
 ```
 
-### `upscale_channels(channels, upscale_factor, max_iter, threshold) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:544
+### `_cap_ist_changes_to_baseline_peak(expanded_channel, ist_changes, max_rounds=20) -> cp.ndarray`
+**File:** fat_llama/audio_fattener/feed.py:619
 **Kind:** function
-**Description:** Runs `new_interpolation_algorithm` then `iterative_soft_thresholding` (added onto the interpolated result) sequentially over each channel in `channels.T`, then stacks the processed channels back into a single array.
+**Description:** New in cycle 6 (ported from the sibling fat_llama_fftw package), fixing a real regression measured after cycle 5's peak-relative IST fix: rescales `ist_changes` uniformly (one scalar per channel) so the combined `expanded_channel + ist_changes` peak approaches — but is not mathematically guaranteed to reach — the pre-IST interpolation baseline's own peak, via up to `max_rounds` iterative shrink rounds (each shrinks `scale` by `baseline_peak / combined_peak` if still over). Without this, IST's own peak-relative boost (usually of low-frequency content) inflated the channel's peak, which `upscale()`'s later autoscale/normalize stages (each a per-channel scalar divide) then divided the *whole* channel down by — attenuating even bands IST never touched (measured: coherence 9.5→8.0, spectral_deviation convergence 0.984→0.770). Verified that an exact "never exceed baseline" guarantee is unreachable via a positive scalar when IST's surviving content is exactly in phase with the baseline's peak sample (only `scale=0` satisfies it there, which would reopen "IST adds nothing") — so this is a large, verified reduction (~97% of the excess-over-baseline on an adversarial synthetic case), not a hard bound.
+**Parameters:**
+- `expanded_channel` (`cp.ndarray`): pre-IST, interpolated channel (the baseline peak).
+- `ist_changes` (`cp.ndarray`): IST's output for this channel, about to be added onto `expanded_channel`.
+- `max_rounds` (`int`): maximum iterative shrink rounds. Default `20`.
+**Returns:** `cp.ndarray` — `ist_changes` uniformly rescaled by a scalar in `[0, 1]` (unchanged if no capping needed).
+**Usage:**
+```python
+ist_changes = _cap_ist_changes_to_baseline_peak(expanded_channel, ist_changes)
+```
+
+### `upscale_channels(channels, upscale_factor, max_iter, threshold) -> cp.ndarray`
+**File:** fat_llama/audio_fattener/feed.py:915
+**Kind:** function
+**Description:** Runs `new_interpolation_algorithm`, then `iterative_soft_thresholding`, then (as of cycle 6) `_cap_ist_changes_to_baseline_peak` (added onto the interpolated result) sequentially over each channel in `channels.T`, then stacks the processed channels back into a single array.
 **Parameters:**
 - `channels` (`cp.ndarray`): input audio channels, shape `(N, C)`.
 - `upscale_factor` (`int`): interpolation factor.
@@ -300,7 +314,7 @@ GPU_AVAILABLE = _cuda_gpu_available()
 ### `class TestAudioFattener(unittest.TestCase)`
 **File:** fat_llama/tests/test_feed.py:44
 **Kind:** class
-**Description:** The project's test suite for `fat_llama.audio_fattener.feed`. `setUp`/`tearDown` create and remove a synthetic 1-second 440 Hz sine-wave MP3 fixture. Non-GPU tests (`test_read_audio`, `test_write_audio`, `test_write_audio_normalize_false_preserves_relative_level`, `test_write_audio_wav_uses_64bit_float_and_is_lossless`, `test_compute_upscale_factor_bounds_realistic_sample_rate`, `test_lms_block_ranges_partitions_range_exactly`) run unconditionally; everything else is decorated `@requires_gpu` and exercises `lms_filter`, `iterative_soft_thresholding`/`_ist_chain`/`initialize_ist`, `new_interpolation_algorithm`, `apply_original_nyquist_cutoff`, and end-to-end `upscale()` behavior (Nyquist cutoff, adaptive filter wiring, `toggle_normalize`, `target_bitrate_kbps`-driven factor bounds). Cycle 5 (fftw-optimization port) added `test_initialize_ist_threshold_is_peak_relative`, `test_iterative_soft_thresholding_excludes_dc_bin`, `test_iterative_soft_thresholding_converges_before_max_iter`, and `test_iterative_soft_thresholding_block_processing_shape_and_finite`, and adjusted `test_ist_no_static_floor_in_quiet_segment`'s measurement window to start one `IST_BLOCK_SIZE` past the loud/quiet transition (a documented, bounded one-block-width transition-edge artifact, not a reintroduction of the persistent whole-track floor the test guards against). No test currently asserts that the *upscaled* output content resembles the *source* content beyond dominant-frequency checks (no decimate-and-correlate coherence test, unlike the fftw sibling package's test suite; also flagged: no stereo-channel end-to-end coverage, no non-mp3 source-format coverage).
+**Description:** The project's test suite for `fat_llama.audio_fattener.feed`. `setUp`/`tearDown` create and remove a synthetic 1-second 440 Hz sine-wave MP3 fixture. Non-GPU tests (`test_read_audio`, `test_write_audio`, `test_write_audio_normalize_false_preserves_relative_level`, `test_write_audio_wav_uses_64bit_float_and_is_lossless`, `test_compute_upscale_factor_bounds_realistic_sample_rate`, `test_lms_block_ranges_partitions_range_exactly`) run unconditionally; everything else is decorated `@requires_gpu` and exercises `lms_filter`, `iterative_soft_thresholding`/`_ist_chain`/`initialize_ist`, `new_interpolation_algorithm`, `apply_original_nyquist_cutoff`, and end-to-end `upscale()` behavior (Nyquist cutoff, adaptive filter wiring, `toggle_normalize`, `target_bitrate_kbps`-driven factor bounds). Cycle 5 (fftw-optimization port) added `test_initialize_ist_threshold_is_peak_relative`, `test_iterative_soft_thresholding_excludes_dc_bin`, `test_iterative_soft_thresholding_converges_before_max_iter`, and `test_iterative_soft_thresholding_block_processing_shape_and_finite`, and adjusted `test_ist_no_static_floor_in_quiet_segment`'s measurement window to start one `IST_BLOCK_SIZE` past the loud/quiet transition (a documented, bounded one-block-width transition-edge artifact, not a reintroduction of the persistent whole-track floor the test guards against). Cycle 6 (fixing a real regression cycle 5 introduced) added `test_uncapped_ist_inflates_combined_channel_peak`, `test_cap_ist_changes_to_baseline_peak_bounds_peak_without_zeroing_detail`, `test_cap_ist_changes_to_baseline_peak_is_noop_when_not_needed`, and `test_upscale_channels_combined_peak_never_exceeds_interpolation_baseline`. No test currently asserts that the *upscaled* output content resembles the *source* content beyond dominant-frequency checks (no decimate-and-correlate coherence test, unlike the fftw sibling package's test suite; also flagged: no stereo-channel end-to-end coverage, no non-mp3 source-format coverage).
 **Usage:**
 ```python
 python -m unittest fat_llama.tests.test_feed

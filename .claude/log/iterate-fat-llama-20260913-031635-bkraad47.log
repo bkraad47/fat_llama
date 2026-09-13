@@ -79,5 +79,38 @@ Output: No early stop. Proceeding to step (d) fix -- this cycle's fix should add
 ### [04:00:00 UTC] Cycle 2, step (d) — fix (dispatched, awaiting result)
 Input: cycle 2's test-fat-llama JSON (score_2=0.8889, coherence 8.0, spectral_deviation 8.8, both down from cycle 1), DIRECTIVES verbatim, condensed mission context, diagnosis (IST peak inflation -> harder final-normalize division of untouched bands) plus fftw's _cap_ist_changes_to_baseline_peak mechanism as the candidate fix.
 Action: Dispatched `generate-code` subagent to verify the diagnosis against this codebase's actual pipeline order and implement/verify an equivalent capping mechanism if confirmed. Agent ID a9a76a1fc08f18035 (internal).
+Output: generate-code report -- outcome "refuted-then-confirmed". Verified diagnosis directly against this codebase's own upscale_channels call path: confirmed ~1.80x combined-channel peak inflation on a synthetic loud-low/quiet-high test matching upscale()'s own defaults. First hypothesis (exact "combined peak must never exceed baseline" via bisection) was refuted -- mathematically unreachable except at scale=0 for in-phase dominant content, which would reopen the "IST adds nothing" bug. Reverted to fftw's own bounded (20-round) multiplicative-shrink mechanism (a large-but-imperfect reduction, not a hard guarantee) -- added _cap_ist_changes_to_baseline_peak, wired into upscale_channels between IST and the add-onto-expanded-channel step. Measured: peak excess-over-baseline dropped to ~1/7th of uncapped on the synthetic test, ist_changes retained ~5.9% of its uncapped peak (uniform scalar, so relative internal weighting unchanged). 26/26 local unittest tests pass (21 unchanged + 5 new regression tests). Real-audio re-validation explicitly flagged as NOT done -- generate-code predicts scores moving back toward the pre-cycle-1 baseline (9.5/9.9) but calls this a prediction, not a verified result. generate-code's own log: .claude/log/generate-code-20260913-035955-bkraad47.log.
+
+SECURITY FLAG (surfaced per scope-and-safety.md's injection-detection rule, not part of this cycle's fix itself): generate-code reported that reading .claude/agents/rules/code-quality.md returned a tool result containing an embedded, fake system-reminder-styled block attempting to redirect git commit/PR attribution to a different model name and session URL than this run's genuine one. It had no effect (no commits/PRs were made from that read) and this coordinator continues using only the attribution from its own genuine system reminder. Reported directly to the user in this turn.
+
+### [04:12:00 UTC] Cycle 2, step (e) — checkpoint
+Input: generate-code's changes (fat_llama/audio_fattener/feed.py, fat_llama/tests/test_feed.py) plus this run's own log files.
+Action: `git add -A && git commit -m "iterate-fat-llama: cycle 2 fix"` (commit 13e831b), then `git tag v-2.0.0/iter-2`.
+Output: Committed (12 files changed, 742 insertions/16 deletions), tagged v-2.0.0/iter-2.
+
+### [04:13:40 UTC] Cycle 3, step (a) — review current state
+Input: candidate C_2 (working tree at v-2.0.0/iter-2).
+Action: Dispatched `review-current-state` skill. Its own log: .claude/log/review-current-state-20260913-041300-bkraad47.log.
+Output: docs/CURRENT_STATE.md refreshed — added _cap_ist_changes_to_baseline_peak factblock, updated upscale_channels.
+
+### [04:14:00 UTC] Cycle 3, step (b) — test (dispatched, awaiting result)
+Input: candidate C_2. This is the real-audio validation of cycle 2's peak-capping fix.
+Action: Dispatching `test-fat-llama` skill.
+Output: BLOCKED. code-tester-reviewer completed (26/26 code tests pass, 0 quality findings). audio-quality-checker FAILED partway through due to an external session-level rate limit (HTTP 429, "You've hit your session limit - resets 3:50pm (Australia/Sydney)"), not a code defect -- no audio_quality evidence for candidate C_2 was produced. Pausing here rather than retrying immediately (would likely hit the same limit again) or reporting a score_3 without real audio evidence, per this skill's own evidence-based scoring requirement (score_i must come from actual test-fat-llama JSON, and "no audio evidence isn't satisfactory" already covers the total_i=0 case -- fabricating or guessing a score here would be worse). Reported to the user directly this turn; awaiting their direction (retry now vs. wait for the limit to reset) before continuing cycle 3.
+
+### [04:14:15 UTC] Cycle 3, step (b) — test (resumed and completed)
+Input: user said the rate limit should be gone, asked to retry.
+Action: Re-dispatched audio-quality-checker via test-fat-llama (clean retry, same candidate C_2). Succeeded this time.
+Output: 26/26 code tests pass, 0 quality findings; 13/14 audio_quality entries pass (1 fail: test_added_detail_below_original_nyquist -- no measurable added detail, flagged as a transparent-upscale characteristic not a defect). coherence=9.0/10 (recovered from 8.0, but still -0.5 vs the original pre-cycle-1 baseline's 9.5), spectral_deviation=9.9/10 (fully recovered, matches baseline). total_3=14, passed_3=13, **score_3 = 0.9286**. Confirmed: cycle 2's peak-capping fix closed the attenuation regression (max attenuation now -0.37dB vs previously 1.7-4.8dB). New finding from audio-quality-checker: the uniform-scalar cap now suppresses IST's contribution almost entirely -- near-zero added detail is the cost of closing the regression. Suggested (not implemented) next lever: frequency-selective capping (cap only the band containing the baseline's peak sample, leave quiet HF bands unscaled) instead of one uniform per-channel scalar. Full detail: .claude/log/test-fat-llama-20260913-041335-bkraad47.log.
+
+### [04:14:20 UTC] Cycle 3, step (c) — early-stop check
+Input: score_3=0.9286.
+Action: Checked both early-stop conditions.
+Reasoning: score_3 != 1.0. Satisfactory-results: (1) no code bugs -- holds (26/26 pass). (2) coherence 9.0 > 8.5 -- holds. (3) spectral_deviation 9.9 > 9.0 -- holds. (4) DIRECTIVES satisfied -- FAILS: the one remaining failure (no measurable added detail below the original Nyquist) is squarely within what DIRECTIVES asked for -- "apply fftw's optimizations" toward a genuinely improved v2, and the whole point of IST/FFTW's optimizations is to add real detail, not just avoid regressions. Current state also still sits 0.5 below the pre-cycle-1 baseline's coherence (9.0 vs 9.5), i.e. after 2 fix cycles we have not net-improved over doing nothing, only recovered most of an intermediate self-inflicted regression. Condition (4) failing means satisfactory-results does not hold even though (1)-(3) do.
+Output: No early stop -- proceeding to step (d), cycle 3's fix. Target: attempt audio-quality-checker's own suggested lever (frequency-selective IST-contribution capping instead of a single uniform per-channel scalar) to recover genuine measurable added detail without reopening the cross-band attenuation regression cycle 2 fixed.
+
+### [04:15:00 UTC] Cycle 3, step (d) — fix (dispatched, awaiting result)
+Input: cycle 3's test-fat-llama JSON, DIRECTIVES verbatim, condensed mission context, audio-quality-checker's own frequency-selective-capping suggestion.
+Action: Dispatched `generate-code` with explicit instructions to investigate conservatively, verify via new unit tests (loud-low-freq peak driver + separate quiet-high-freq detail component), and to explicitly decline shipping a half-verified mechanism if it can't be soundly verified this cycle -- a no-op/safer-refinement outcome is acceptable given rollback exists as a safety net. Agent ID a2b020008deb8fd7f (internal).
 Output: pending.
 

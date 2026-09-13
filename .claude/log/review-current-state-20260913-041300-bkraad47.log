@@ -1,0 +1,10 @@
+### [04:13:00 UTC] Step 1-3 — re-read changed files
+Input: candidate C_2 (post cycle-2 fix, tag v-2.0.0/iter-2).
+Action: Re-read the changed sections of fat_llama/audio_fattener/feed.py (_cap_ist_changes_to_baseline_peak, updated upscale_channels) and confirmed fat_llama/tests/test_feed.py's 5 new tests via generate-code's own report.
+Output: New function _cap_ist_changes_to_baseline_peak (line 619); upscale_channels updated to call it between IST and the add-onto-expanded-channel step.
+
+### [04:13:30 UTC] Step 4-6 — update docs/CURRENT_STATE.md
+Action: Added factblock for _cap_ist_changes_to_baseline_peak, updated upscale_channels' factblock and line number, updated TestAudioFattener's class summary with cycle 6's 4 new tests.
+Output: docs/CURRENT_STATE.md updated — 18 feed.py factblocks (17 -> 18, +1 new function).
+
+### [04:13:35 UTC] DONE — docs/CURRENT_STATE.md refreshed against candidate C_2 (cycle 2 fix applied).

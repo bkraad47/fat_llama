@@ -1104,11 +1104,14 @@ class TestAudioFattener(unittest.TestCase):
         # attenuating every frequency including ones IST never touched.
         #
         # The fix must (a) actually bound the combined peak at (or very
-        # near) the pre-IST baseline peak, and (b) NOT reopen the
-        # documented "IST barely adds anything" bug by shrinking
-        # ist_changes to near zero -- i.e. the quiet high-frequency
-        # component's own contribution to ist_changes must survive at a
-        # measurable, non-collapsed level.
+        # near) the pre-IST baseline peak, (b) NOT reopen the documented
+        # "IST barely adds anything" bug by shrinking ist_changes to near
+        # zero, and (c) (cycle 7 refinement, added after audio-quality-
+        # checker measured that cycle 6's single-uniform-scalar cap
+        # satisfied (a)/(b) but suppressed IST's real contribution almost
+        # everywhere) actually preserve a quiet, non-dominant band's own
+        # contribution rather than uniformly shrinking it along with the
+        # dominant one.
         sr = 44100
         n = sr
         t = cp.arange(n, dtype=cp.float64) / sr
@@ -1167,21 +1170,7 @@ class TestAudioFattener(unittest.TestCase):
         )
 
         # (b) The cap must not have collapsed ist_changes to (essentially)
-        # zero. This scenario is deliberately adversarial -- IST's
-        # peak-relative threshold retains mostly the same dominant 100 Hz
-        # component the baseline's own peak sample sits on, i.e. exactly
-        # the in-phase case where (per the docstring) even a small
-        # positive scale still increases the combined peak, so a bounded
-        # 20-round multiplicative shrink converges toward a small (not
-        # zero) scale rather than a comfortably large one on this
-        # particular signal (measured directly: ~5.9% of the uncapped
-        # peak survives here). The meaningful, non-circular claim is that
-        # SOME real detail survives (scale is bounded away from zero, not
-        # driven to it) -- the cap is a single uniform scalar, so it can
-        # never zero out one frequency's contribution while preserving
-        # another's; whatever fraction of ist_changes survives, the
-        # quiet 8000 Hz component keeps the exact same relative weight
-        # within it as before capping.
+        # zero overall.
         capped_ist_peak = float(cp.max(cp.abs(capped_ist_changes)))
         self.assertGreater(
             capped_ist_peak, uncapped_ist_peak * 0.01,
@@ -1191,31 +1180,106 @@ class TestAudioFattener(unittest.TestCase):
             "nonzero scale even on this adversarial in-phase scenario, "
             "not a full reopening of the 'IST adds nothing' bug."
         )
-        # The quiet 8000 Hz component's own relative weight within
-        # ist_changes must be exactly preserved by capping (a uniform
-        # scalar cannot disproportionately zero out one frequency), i.e.
-        # it must still be present in capped_ist_changes at (scale) times
-        # its uncapped level, not silently dropped altogether on top of
-        # the uniform shrink.
-        uncapped_scale = float(
-            cp.max(cp.abs(capped_ist_changes))
-            / cp.max(cp.abs(ist_changes))
+
+        # (c) Cycle 7 (frequency-selective refinement): unlike cycle 6's
+        # single uniform scalar -- which necessarily shrank the quiet
+        # 8000 Hz component by the SAME small factor as the dominant
+        # 100 Hz band (measured ~5.9% survival there) -- the frequency-
+        # selective cap must leave a component well outside the dominant
+        # band's own FFT magnitude (the quiet 8000 Hz tone) essentially
+        # untouched, since it was never part of the mechanism causing the
+        # peak inflation in the first place.
+        new_sr = sr * upscale_factor
+        freqs = cp.fft.rfftfreq(len(ist_changes), 1.0 / new_sr)
+        quiet_band_mask = (freqs >= 7990) & (freqs <= 8010)
+
+        def _quiet_band_magnitude(signal):
+            spectrum = cp.abs(cp.fft.rfft(signal))
+            return float(cp.sum(spectrum[quiet_band_mask]))
+
+        uncapped_quiet_magnitude = _quiet_band_magnitude(ist_changes)
+        capped_quiet_magnitude = _quiet_band_magnitude(capped_ist_changes)
+        self.assertGreater(
+            uncapped_quiet_magnitude, 0.0,
+            "Test setup assumption violated: ist_changes carries no "
+            "measurable content in the quiet 8000 Hz band, so this test "
+            "cannot meaningfully exercise frequency-selective "
+            "preservation."
         )
-        expected_capped = ist_changes * uncapped_scale
-        self.assertTrue(
-            bool(cp.allclose(
-                capped_ist_changes, expected_capped, rtol=1e-6
-            )),
-            "_cap_ist_changes_to_baseline_peak did not apply a single "
-            "uniform scalar to ist_changes -- some frequency content "
-            "(e.g. the quiet 8000 Hz component) may have been altered "
-            "disproportionately relative to the rest."
+        quiet_survival = capped_quiet_magnitude / uncapped_quiet_magnitude
+        self.assertGreater(
+            quiet_survival, 0.9,
+            "_cap_ist_changes_to_baseline_peak did not preserve the "
+            "quiet 8000 Hz component's own contribution to ist_changes "
+            f"(survival fraction {quiet_survival:.3g}, expected > 0.9); "
+            "this looks like cycle 6's uniform-scalar cap (~0.059 "
+            "survival there), not the cycle 7 frequency-selective "
+            "refinement, which should leave bands far from the dominant "
+            "one essentially untouched."
         )
 
-        # Sanity: the cap is a pure uniform rescale (a single scalar),
-        # never a shape change -- same length, and every retained
-        # relative ratio between samples of ist_changes is preserved.
+        # Sanity: the cap never changes the signal's length, even though
+        # (as of cycle 7) it may reshape the spectrum rather than apply a
+        # single uniform scalar.
         self.assertEqual(len(capped_ist_changes), len(ist_changes))
+
+    @requires_gpu
+    def test_cap_ist_changes_to_baseline_peak_safety_net_matches_uniform_cap(  # noqa: E501
+        self
+    ):
+        # Cycle 7's frequency-selective pass only shrinks bins classified
+        # "dominant" (>= dominant_band_ratio times the spectrum's own
+        # peak magnitude); a `dominant_band_ratio` greater than 1.0 makes
+        # that classification impossible for any bin (no magnitude can
+        # exceed the spectrum's own peak), producing an empty dominant
+        # band and leaving the frequency-selective pass with nothing to
+        # shrink -- a deliberately pathological input exercising the
+        # safety-net fallback (cycle 6's original whole-signal uniform
+        # shrink, applied on top of the frequency-selective candidate)
+        # rather than the common path. The safety net must still bound
+        # the combined peak at least as well as cycle 6's own uniform cap
+        # did on this exact signal -- i.e. it must not silently do worse
+        # than the mechanism it is meant to fall back to.
+        sr = 44100
+        n = sr
+        t = cp.arange(n, dtype=cp.float64) / sr
+        channel = (
+            20000.0 * cp.sin(2 * cp.pi * 100 * t)
+            + 500.0 * cp.sin(2 * cp.pi * 8000 * t)
+        )
+        upscale_factor = 4
+
+        expanded = new_interpolation_algorithm(channel, upscale_factor)
+        ist_changes = iterative_soft_thresholding(
+            expanded, max_iter=300, threshold=0.6
+        )
+        baseline_peak = float(cp.max(cp.abs(expanded)))
+        uncapped_combined_peak = float(cp.max(cp.abs(expanded + ist_changes)))
+        uncapped_excess = uncapped_combined_peak - baseline_peak
+
+        capped_via_safety_net = _cap_ist_changes_to_baseline_peak(
+            expanded, ist_changes, dominant_band_ratio=1.5
+        )
+        combined_peak_after = float(
+            cp.max(cp.abs(expanded + capped_via_safety_net))
+        )
+        capped_excess = combined_peak_after - baseline_peak
+
+        # Same acceptance bound used by
+        # test_cap_ist_changes_to_baseline_peak_bounds_peak_without_
+        # zeroing_detail for the ordinary (non-pathological) path -- the
+        # safety net must reach the same standard cycle 6 verified
+        # (~1.80x -> ~1.05x, i.e. capped excess < 15% of uncapped excess),
+        # not merely "better than nothing".
+        self.assertLess(
+            capped_excess, uncapped_excess * 0.15,
+            "The whole-signal uniform-shrink safety net did not bound "
+            f"the combined peak as well as cycle 6's original cap "
+            f"(uncapped excess {uncapped_excess:.3g} over baseline "
+            f"{baseline_peak:.3g} -> capped excess {capped_excess:.3g}); "
+            "expected at least the same ~85% excess reduction on this "
+            "pathological dominant_band_ratio input."
+        )
 
     @requires_gpu
     def test_cap_ist_changes_to_baseline_peak_is_noop_when_not_needed(self):
