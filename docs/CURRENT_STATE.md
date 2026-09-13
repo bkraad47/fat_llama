@@ -1,328 +1,219 @@
 # fat_llama — Current State
 
-Snapshot produced by the `review-current-state` skill. Scope: whole repository (default). This file is regenerated on demand — do not hand-edit it.
+Regenerable snapshot produced by the `review-current-state` skill. Scope: the whole repository (tracked files only, per `git ls-files`, excluding `.claude/` and `.github/`). Do not hand-edit — rerun the skill to refresh.
 
 ## File tree
 
 ```
 fat_llama/
-├── .github/
-│   └── workflows/
-│       ├── deploy.yml
-│       ├── issue-branch-resolve.yml
-│       ├── issue-release-comment.yml
-│       └── tests.yml
-├── docs/
-│   ├── CURRENT_STATE.md
-│   └── images/
-│       ├── spectrogram_comparison.png
-│       └── theory.png
-├── fat_llama/
-│   ├── __init__.py
-│   ├── audio_fattener/
-│   │   ├── __init__.py
-│   │   └── feed.py
-│   └── tests/
-│       ├── __init__.py
-│       └── test_feed.py
-├── analysis.py
-├── example.py
+├── .gitignore
+├── .mcp.json
+├── CHANGELOG.md
 ├── LICENSE
 ├── Manifest.in
 ├── README.md
+├── analysis.py
+├── example.py
 ├── requirements.txt
 ├── setup.py
 ├── input_test.mp3
 ├── input_test.flac
-└── output_test.flac
+├── output_test.flac
+├── docs/
+│   ├── CURRENT_STATE.md
+│   └── images/
+│       ├── logo.jpg
+│       ├── spectrogram_comparison.png
+│       └── theory.png
+└── fat_llama/
+    ├── __init__.py
+    ├── audio_fattener/
+    │   ├── __init__.py
+    │   └── feed.py
+    └── tests/
+        ├── __init__.py
+        └── test_feed.py
 ```
-
-_Note: `.github/workflows/**` files are listed for completeness only — never factblocked or edited by any skill/agent per `.claude/rules/scope-and-safety.md`._
-
-## analysis.py
-
-Standalone comparison/analysis script (not part of the installed `fat_llama` package) — loads an MP3/FLAC pair and produces waveform, difference, MSE, spectrogram, cross-correlation, and frequency-domain comparisons. Depends on `cupy` (GPU) unconditionally at import time.
-
-### `read_mp3(file_path) -> Tuple[np.ndarray, int]`
-**File:** analysis.py:8
-**Kind:** function
-**Description:** Loads an MP3 file via `pydub.AudioSegment`, converts stereo to mono by averaging channels, and returns the sample data alongside the frame rate. No docstring; inferred from body.
-**Parameters:**
-- `file_path` (`str`): path to the MP3 file to read.
-**Returns:** `(data, frame_rate)` — mono sample array and the file's frame rate (Hz).
-**Usage:**
-```python
-data, sample_rate = read_mp3('input_test.mp3')  # illustrative
-```
-
-### `read_flac(file_path) -> Tuple[np.ndarray, int]`
-**File:** analysis.py:16
-**Kind:** function
-**Description:** Loads a FLAC file via `soundfile.read`, averaging stereo channels down to mono. No docstring; inferred from body.
-**Parameters:**
-- `file_path` (`str`): path to the FLAC file to read.
-**Returns:** `(data, sample_rate)` — mono sample array and sample rate (Hz).
-**Usage:**
-```python
-data, sample_rate = read_flac('output_test.flac')  # illustrative
-```
-
-### `normalize(signal) -> np.ndarray`
-**File:** analysis.py:22
-**Kind:** function
-**Description:** Scales a signal by its peak absolute amplitude so the result falls within [-1, 1]. No docstring; inferred from body.
-**Parameters:**
-- `signal` (`np.ndarray`): the signal to normalize.
-**Returns:** `np.ndarray` — the peak-normalized signal.
-**Usage:**
-```python
-normed = normalize(mp3_samples)  # illustrative
-```
-
-### `compare_signals(mp3, flac, sample_rate) -> None`
-**File:** analysis.py:25
-**Kind:** function
-**Description:** Normalizes and length-aligns two signals, then renders/prints a battery of comparisons: waveform plot, difference-signal plot, mean squared error, spectrograms (via `scipy.signal.spectrogram`), a GPU cross-correlation (`cupy`), and a GPU FFT-based frequency-domain comparison. Purely diagnostic — produces plots via `matplotlib.pyplot.show()` and prints to stdout; returns nothing. No docstring; inferred from body.
-**Parameters:**
-- `mp3` (`np.ndarray`): MP3-decoded signal.
-- `flac` (`np.ndarray`): FLAC-decoded signal.
-- `sample_rate` (`int`): sample rate shared by both signals (post-resampling).
-**Returns:** `None` — side effects only (plots, stdout).
-**Usage:**
-```python
-# From analysis.py's own __main__ block:
-mp3, sample_rate_mp3 = read_mp3('input_test.mp3')
-flac, sample_rate_flac = read_flac('output_test.flac')
-compare_signals(mp3, flac, sample_rate_mp3)
-```
-
-## example.py
-
-Minimal usage example for the package's public `upscale` entry point; also wired as the `example` console-script entry point in `setup.py` (though `setup.py` points it at `example:main`, and this module defines no `main` function — see factblock_stale note below).
-
-No functions/classes defined — the module body is a single top-level call:
-```python
-from fat_llama.audio_fattener.feed import upscale
-
-upscale(
-    input_file_path='input_test.mp3',
-    output_file_path='output_test.flac',
-    source_format='mp3',
-    target_format='flac',
-    max_iterations=300,
-    threshold_value=0.6,
-    target_bitrate_kbps=1400,
-    toggle_normalize=True,
-    toggle_autoscale=True,
-    toggle_adaptive_filter=True
-)
-```
-
-## setup.py
-
-Package metadata for `fat_llama` (PyPI distribution). No functions/classes — a single `setuptools.setup(...)` call. Current `version`: `1.4.0` (not yet bumped for this run's in-progress cycles — see Notes below). `install_requires`: `numpy`, `cupy-cuda13x`, `pydub`, `soundfile`, `mutagen`, `scipy`. Declares console-script entry point `example=example:main`.
-
-## fat_llama/__init__.py
-
-Empty — no exports.
-
-## fat_llama/audio_fattener/__init__.py
-
-Empty — no exports.
 
 ## fat_llama/audio_fattener/feed.py
 
-The package's core module: reads/writes audio files and implements the GPU-accelerated (CuPy) upscaling pipeline (interpolation, iterative soft-thresholding "IST", LMS adaptive filtering).
+Module-level constant: `MAX_REALISTIC_SAMPLE_RATE_HZ = 192000` — the realistic consumer-playback sample-rate ceiling used to bound `compute_upscale_factor`'s output; see that function's factblock.
 
-### `read_audio(file_path, audio_format) -> Tuple[int, np.ndarray, Optional[float], AudioSegment]`
+### `read_audio(file_path, audio_format) -> (int, np.ndarray, float|None, AudioSegment)`
 **File:** fat_llama/audio_fattener/feed.py:27
 **Kind:** function
-**Description:** Reads an audio file via `pydub.AudioSegment.from_file` (with `-drc_scale 0` passed to ffmpeg), converts samples to a `float64` NumPy array, and looks up the file's bitrate via `mutagen` for mp3/flac/ogg/wav (falling back to a byte-rate estimate for other formats). Reshapes samples to `(-1, 2)` for stereo input. Raises `FileNotFoundError` if the input path doesn't exist. Parameter was renamed from `format` to `audio_format` (cycle 1 fix) to stop shadowing the `format()` builtin.
+**Description:** Reads an audio file via `pydub.AudioSegment` (with `-drc_scale 0` passed to ffmpeg), extracts raw PCM samples as `float64`, the sample rate, and — via format-specific `mutagen` readers (mp3/flac/ogg/wav) or a duration-based estimate otherwise — the source bitrate. Reshapes to `(-1, 2)` for 2-channel audio.
 **Parameters:**
-- `file_path` (`str`): path to the input audio file.
-- `audio_format` (`str`): input format (`'mp3'`, `'flac'`, `'ogg'`, `'wav'`, or other ffmpeg-supported format).
-**Returns:** `(sample_rate, samples, bitrate, audio)` — sample rate in Hz, sample data (`float64`, shape `(n,)` or `(n, 2)`), bitrate in bits/sec (`None` if undeterminable), and the underlying `AudioSegment`.
+- `file_path` (`str`): path to the input audio file; raises `FileNotFoundError` if missing.
+- `audio_format` (`str`): one of `'mp3'`, `'flac'`, `'ogg'`, `'wav'` (others fall back to a duration-derived bitrate estimate).
+**Returns:** `(sample_rate, samples, bitrate, audio)` — `sample_rate` (int), `samples` (`np.ndarray`, raw-PCM-scale float64, mono 1-D or stereo `(N, 2)`), `bitrate` (float or `None`), `audio` (the `pydub.AudioSegment`, used downstream for `audio.channels` and `audio.max_possible_amplitude`).
 **Usage:**
 ```python
-# From fat_llama/tests/test_feed.py:
-sample_rate, samples, bitrate, audio = read_audio(self.test_mp3_file, audio_format='mp3')
+sample_rate, samples, bitrate, audio = read_audio('input_test.mp3', audio_format='mp3')
 ```
 
 ### `write_audio(file_path, sample_rate, data, audio_format, normalize=True, reference_amplitude=None) -> None`
 **File:** fat_llama/audio_fattener/feed.py:81
 **Kind:** function
-**Description:** Writes sample data to disk via `soundfile.write`. `'flac'` is written as 24-bit PCM (`PCM_24` — libsndfile's real ceiling for FLAC, no float/double FLAC subtype exists); `'wav'` is written as 64-bit float (`DOUBLE`, issue #18 fix) to match this pipeline's internal float64/complex128 computation exactly, with zero quantization loss. Raises `ValueError` for any other target format. When `normalize=True` (default, backward-compatible with all prior behavior), peak-normalizes `data` to full scale (dividing by its own max abs value, leaving near-silent input as-is) then clips to `[-1, 1]` for the integer (`flac`) subtype only — `soundfile` silently clamps out-of-range float input for integer subtypes instead of raising, so callers handing back raw-PCM-scale data (not `[-1, 1]`) would otherwise clip almost every sample. When `normalize=False` (issue #18 fix — previously `toggle_normalize=False` upstream had no effect on the actual written level, since this function always force-normalized regardless), divides by the fixed `reference_amplitude` instead of `data`'s own peak — a lossless domain conversion (raw-PCM-scale → conventional float-PCM scale) rather than a loudness change, so the output genuinely reflects the original recording's relative level; exact/lossless for the float (`wav`/`DOUBLE`) subtype (no clip applied), clipped as a container-required safety net for the integer (`flac`) subtype. Falls back to peak-based scaling if `reference_amplitude` is falsy. Parameter renamed from `format` to `audio_format` (cycle 1 fix, issue #20 run).
+**Description:** Writes `data` to a FLAC (`PCM_24`, libsndfile's real ceiling for FLAC) or WAV (`DOUBLE`, true 64-bit float, lossless) file via `soundfile`. When `normalize=True` (default), peak-normalizes to full scale (clipping non-float subtypes to `[-1, 1]`). When `False`, divides by a fixed `reference_amplitude` (typically the source's own bit-depth full-scale value) instead of the buffer's own peak — a lossless domain conversion for float subtypes, clipped for integer subtypes — so the written level genuinely reflects the source's relative loudness instead of always being stretched to 0 dBFS.
 **Parameters:**
-- `file_path` (`str`): output file path.
-- `sample_rate` (`int`): sample rate in Hz.
-- `data` (`np.ndarray`): audio sample data (any scale — normalized/rescaled internally before writing).
-- `audio_format` (`str`): output format, `'flac'` or `'wav'`.
-- `normalize` (`bool`): whether to force full-scale peak-normalization before writing. Defaults to `True`.
-- `reference_amplitude` (`float | None`): fixed scale to divide by when `normalize=False` (typically the source's own bit-depth full-scale amplitude). Ignored when `normalize=True`. Defaults to `None` (falls back to peak-based scaling).
-**Returns:** `None`.
+- `file_path` (`str`): output path.
+- `sample_rate` (`int`): output sample rate.
+- `data` (`np.ndarray`): audio samples to write (raw-PCM-scale or otherwise, depending on `normalize`).
+- `audio_format` (`str`): `'flac'` or `'wav'` (else raises `ValueError`).
+- `normalize` (`bool`): force full-scale peak-normalize before writing. Default `True`.
+- `reference_amplitude` (`float|None`): fixed divisor used when `normalize=False`; falls back to peak-based scaling if not given.
+**Returns:** `None` (writes the file as a side effect).
 **Usage:**
 ```python
-# From fat_llama/tests/test_feed.py:
-write_audio(output_file, sample_rate, samples, audio_format='flac')
+write_audio('output_test.flac', 44100, samples, audio_format='flac')
 ```
 
 ### `new_interpolation_algorithm(data, upscale_factor) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:118
+**File:** fat_llama/audio_fattener/feed.py:200
 **Kind:** function
-**Description:** Upsamples a 1-D real signal via FFT-domain zero-padding (bandlimited/sinc interpolation): `cp.fft.rfft` the input, zero-pad the spectrum with additional (all-zero) high-frequency bins, `cp.fft.irfft` back to a longer time-domain signal, then rescale by `upscale_factor` to correct for `irfft`'s output-length normalization. As of the **cycle 3 fix**, this replaces the prior zero-order-hold duplication (each sample repeated `upscale_factor` times) that cycles 1-2 had investigated and deliberately left unfixed — measured to inject strong mirrored spectral images at multiples of the original sample rate rather than genuine added detail, and to leave `iterative_soft_thresholding` little headroom to add real content. Post-fix: energy above the original Nyquist frequency measured at ~1e-8 relative magnitude (FFT round-off) instead of dominating the extended band; entirely `cp.fft` (CuPy/CUDA), no scipy/numpy CPU dependency; also ~1000x faster than the old per-sample Python loop as a side effect. `upscale_factor == 1` short-circuits to a copy.
+**Description:** Upsamples a single-channel real signal via bandlimited FFT-domain interpolation: `cp.fft.rfft` the input, zero-pad the one-sided spectrum to the upscaled length's rfft size (introducing no new spectral content, unlike zero-order-hold's imaging), `cp.fft.irfft` back to the longer signal, rescaled by `upscale_factor` to correct `irfft`'s own normalization. `upscale_factor == 1` is a no-op passthrough.
 **Parameters:**
-- `data` (`cp.ndarray`): input audio data (single channel).
-- `upscale_factor` (`int`): the factor by which to upscale the audio data.
-**Returns:** `cp.ndarray` — band-limited upscaled data, length `len(data) * upscale_factor`.
+- `data` (`cp.ndarray`): single-channel input audio data.
+- `upscale_factor` (`int`): integer factor to upsample by.
+**Returns:** `cp.ndarray` — upscaled data, length `len(data) * upscale_factor`, band-limited to the original Nyquist frequency.
 **Usage:**
 ```python
-# From fat_llama/tests/test_feed.py:
-expanded = new_interpolation_algorithm(tone, upscale_factor)
+expanded_channel = new_interpolation_algorithm(channel, upscale_factor=7)
 ```
 
 ### `initialize_ist(data, threshold) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:179
+**File:** fat_llama/audio_fattener/feed.py:261
 **Kind:** function
-**Description:** Zeroes out samples whose absolute value is at or below `threshold`, keeping only samples above it — the initialization step for iterative soft-thresholding.
+**Description:** Initializes IST by hard-thresholding `data` in the time domain: keeps samples whose absolute value exceeds `threshold` (an **absolute**, not peak-relative, cutoff as of this snapshot — see `iterative_soft_thresholding`'s "Known issue" note), zeroing the rest.
 **Parameters:**
 - `data` (`cp.ndarray`): input audio data.
-- `threshold` (`float`): magnitude threshold below which samples are zeroed.
-**Returns:** `cp.ndarray` — thresholded data, same shape as input.
+- `threshold` (`float`): absolute magnitude threshold.
+**Returns:** `cp.ndarray` — thresholded data, same shape as `data`.
 **Usage:**
 ```python
-thresholded = initialize_ist(data, 0.6)  # illustrative
+data_thres = initialize_ist(data, threshold=0.6)
 ```
 
 ### `iterative_soft_thresholding(data, max_iter, threshold) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:195
+**File:** fat_llama/audio_fattener/feed.py:277
 **Kind:** function
-**Description:** Runs `max_iter` rounds of the plain textbook IST round trip: FFT the thresholded signal, zero out FFT bins at/below `threshold`, inverse-FFT back to the time domain. **Issue #20 fix, cycle 4 — harmonic-reconstruction term removed:** cycles 2-3 added a per-iteration synthetic sinusoidal "harmonic reconstruction" term on top of this round trip, meant to reconstruct missing/congested high-frequency content, but it needed correction for a new artifact on three consecutive cycles: unbounded growth with `max_iter` (fixed cycle 2, bounded to `0.1*peak/max_iter`), then a subsonic ~0.066 Hz tone (cycle 2's fixed-`cp.sin(cp.linspace(0,2*pi,n))` construction spanned exactly one cycle across the whole buffer regardless of length), then cycle 3's own fix for that (deriving the frequency from the dominant retained FFT bin each iteration) turned out to still be static across a real multi-second buffer, since a whole-buffer FFT has one global dominant bin — a constant, audible, non-source drone (measured: 98.168 Hz at -28.7 dBFS spanning the entire output) that collapsed measured dynamic range from 57.1 dB to 25.4 dB. Rather than a fourth revision, cycle 4 removed the term entirely: a genuinely time-varying, locally-gated version would need real per-frame frequency/energy estimation with phase continuity across frame boundaries, verifiable only against real GPU audio-quality runs (not available to `generate-code` in this sandbox), and risks nesting a per-block Python loop inside a function already run up to 300 times/channel — the same class of runtime risk issue #20's `lms_filter` fix addressed elsewhere in this file. A properly-verified reintroduction remains a legitimate future direction, not ruled out, just not shipped speculatively. **Known issue (investigated, not fixed):** `threshold` is applied as an absolute cutoff to both raw-PCM-scale time-domain samples and raw FFT-bin magnitudes, but real audio's FFT-bin magnitudes are order ~1e4-1e5 — many orders of magnitude above the conventional default `threshold=0.6` — so the "keep significant frequencies, discard noise" masking barely triggers at real audio scale, leaving IST to mostly perform a near-lossless FFT/IFFT round trip. Flagged as a strong next-cycle candidate (convert to a peak-relative fraction). **Newly flagged (cycle 4, not fixed):** `upscale_channels` adds this function's return value *on top of* the original interpolated signal rather than replacing it, which combined with the threshold issue above means IST's contribution is close to a redundant second copy of the signal (measured: a ~+6 dB rise even post-harmonic-term-removal) — a candidate for a future cycle to reconsider.
+**Description:** Performs `max_iter` rounds of FFT → magnitude-threshold → IFFT on `data` (initialized via `initialize_ist`), each pass unconditionally running (no convergence early-exit as of this snapshot). `threshold` is compared as-is against raw time- and frequency-domain magnitudes, not scaled to the signal's own peak — documented as a known, unresolved issue (real audio's FFT-bin magnitudes are orders of magnitude above the conventional `threshold_value=0.6` default, so almost nothing is masked). A prior per-iteration synthetic harmonic-reconstruction term was tried across several cycles and ultimately removed (see in-file docstring) after being found to inject a constant, non-source tone; this function currently performs the plain FFT/threshold/IFFT round trip only.
 **Parameters:**
-- `data` (`cp.ndarray`): input (already interpolated) audio data.
-- `max_iter` (`int`): number of IST iterations to run.
-- `threshold` (`float`): magnitude threshold applied in both time and frequency domain.
-**Returns:** `cp.ndarray` — the IST-processed signal after `max_iter` iterations.
+- `data` (`cp.ndarray`): input audio data (typically the interpolated, pre-IST channel).
+- `max_iter` (`int`): number of IST iterations to run unconditionally.
+- `threshold` (`float`): absolute FFT-bin magnitude threshold.
+**Returns:** `cp.ndarray` — the IST-processed data (added onto the interpolated signal by `upscale_channels`, not used standalone).
 **Usage:**
 ```python
-ist_result = iterative_soft_thresholding(expanded_channel, max_iter=300, threshold=0.6)  # illustrative
+ist_changes = iterative_soft_thresholding(expanded_channel, max_iter=300, threshold=0.6)
 ```
 
-### `_lms_block_ranges(start, n, block_size) -> Iterator[Tuple[int, int]]`
-**File:** fat_llama/audio_fattener/feed.py:278
+### `_lms_block_ranges(start, n, block_size) -> Generator[(int, int)]`
+**File:** fat_llama/audio_fattener/feed.py:360
 **Kind:** function
-**Description:** Added in the issue #20 fix as a standalone, pure-Python (no CuPy) generator: partitions `[start, n)` into consecutive, non-overlapping `(block_start, block_end)` chunks of at most `block_size` samples each, covering the range exactly once in order. Extracted specifically so the block-partitioning logic behind `lms_filter`'s block-adaptive update can be unit-tested without a CUDA GPU.
+**Description:** Pure-Python (no CuPy) generator partitioning `[start, n)` into consecutive, non-overlapping chunks of at most `block_size` samples, covering the range exactly once in order. Extracted standalone so `lms_filter`'s block-partitioning logic can be unit-tested without a GPU.
 **Parameters:**
-- `start` (`int`): first index to include (the warm-up length).
-- `n` (`int`): one past the last index to include (the signal length).
-- `block_size` (`int`): maximum chunk length; must be `>= 1`.
-**Returns:** `Iterator[Tuple[int, int]]` — `(block_start, block_end)` pairs, `block_end` exclusive.
+- `start` (`int`): first index to include.
+- `n` (`int`): one past the last index to include.
+- `block_size` (`int`): maximum chunk length (`>= 1`).
+**Returns:** generator of `(block_start, block_end)` pairs, `block_end` exclusive.
 **Usage:**
 ```python
-# From fat_llama/tests/test_feed.py:
-ranges = list(_lms_block_ranges(start=33, n=1000, block_size=256))
+list(_lms_block_ranges(33, 1000, 256))
 ```
 
-### `lms_filter(signal, desired, mu=0.001, num_taps=32, delay=1, block_size=256, return_weights=False) -> cp.ndarray | Tuple[cp.ndarray, cp.ndarray]`
-**File:** fat_llama/audio_fattener/feed.py:307
+### `lms_filter(signal, desired, mu=0.001, num_taps=32, delay=1, block_size=256, return_weights=False) -> cp.ndarray | (cp.ndarray, cp.ndarray)`
+**File:** fat_llama/audio_fattener/feed.py:389
 **Kind:** function
-**Description:** Applies a block-adaptive LMS filter (Block LMS, Clark et al. 1981): tap weights are held fixed across each block of up to `block_size` samples, the whole block's filter output is computed with a small (`num_taps`-length) loop of vectorized elementwise CuPy ops over the block at once (via `_lms_block_ranges`), and the weights are updated once per block using the block-averaged instantaneous gradient (weights clipped to ±1e10). Cycle 1 fixed a warm-up-dropout bug (tap-weight vector `w` initialized to `[1, 0, ..., 0]` instead of all-zero). **Cycle 3 finding and fix:** `upscale()` always calls this as `lms_filter(channel, channel)`; the `delay` parameter (default `1`, an Adaptive Line Enhancer / ALE pattern) draws the predictor's taps from `signal` lagged by `delay` samples instead of `signal[i]` itself, making the self-referential case a genuine (if small) estimation problem without reintroducing the warm-up dropout. **Issue #20 finding and fix:** the prior implementation updated `w` once per *sample* via a plain Python `for` loop — several small, sequential CuPy/CUDA kernel calls per iteration, whose combined launch overhead (not raw compute) dominated runtime (measured: 27.5 minutes wall clock for a 15.2s stereo source at a 7x-upscaled sample count of 4,672,878/channel, matching the issue's "30+ minutes" report). The block-adaptive rewrite cuts the number of sequential Python-loop iterations from `n` to roughly `n / block_size`, while remaining a genuinely sequential/online (if coarser-grained) adaptive filter; `block_size=1` reproduces the exact prior per-sample update algebraically.
+**Description:** Block-adaptive LMS Adaptive Line Enhancer (ALE): predicts `desired[i]` from `signal` lagged by `delay` samples using `num_taps` filter taps, held fixed within each block of up to `block_size` samples and updated once per block via the block-averaged instantaneous gradient (`block_size=1` reproduces the exact original per-sample update). `delay >= 1` makes the filter a genuine (non-degenerate) estimation problem even when `signal is desired` (as `upscale()` calls it). Tap weights are near-identity-initialized (`w[0] = 1.0`) to avoid a warm-up dropout, and clipped to `[-1e10, 1e10]` for numerical safety.
 **Parameters:**
-- `signal` (`cp.ndarray`): input signal to filter.
-- `desired` (`cp.ndarray`): desired/reference signal used to compute the error term.
-- `mu` (`float`): LMS step size (default `0.001`).
-- `num_taps` (`int`): number of filter taps (default `32`).
-- `delay` (`int`): ALE decorrelation lag in samples between the predictor's taps and the predicted sample (default `1`); must be `>= 1` for the self-referential `lms_filter(x, x)` case to be non-degenerate.
-- `block_size` (`int`): number of samples per block-adaptive weight update (default `256`); `1` reproduces the exact prior per-sample LMS update. A genuine, disclosed accuracy/speed tradeoff — see the function's own docstring for what to try first if a future coherence run regresses.
-- `return_weights` (`bool`): if `True`, return `(filtered_signal, w)` — the final tap weights alongside the filtered signal — instead of just `filtered_signal` (default `False`, preserves the original call signature for existing callers).
-**Returns:** `cp.ndarray` — the filtered signal, same length as `signal` (or `(filtered_signal, w)` if `return_weights=True`).
+- `signal` (`cp.ndarray`): input signal (the filter's predictor source, lagged by `delay`).
+- `desired` (`cp.ndarray`): desired/target output signal.
+- `mu` (`float`): LMS step size. Default `0.001`.
+- `num_taps` (`int`): number of filter taps. Default `32`.
+- `delay` (`int`): ALE decorrelation lag in samples; must be `>= 1` for the self-referential case to be non-degenerate. Default `1`.
+- `block_size` (`int`): samples per block-adaptive weight update. Default `256`.
+- `return_weights` (`bool`): if `True`, also return the final tap-weight vector. Default `False`.
+**Returns:** `cp.ndarray` (filtered signal), or `(filtered_signal, w)` if `return_weights=True`.
 **Usage:**
 ```python
-# From fat_llama/tests/test_feed.py:
-filtered, w_final = lms_filter(
-    signal, signal, mu=0.001, num_taps=num_taps, return_weights=True
-)
+filtered_channel = lms_filter(normalized_channel, normalized_channel)
 ```
 
 ### `upscale_channels(channels, upscale_factor, max_iter, threshold) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:462
+**File:** fat_llama/audio_fattener/feed.py:544
 **Kind:** function
-**Description:** Per-channel pipeline stage: for each channel in `channels`, runs `new_interpolation_algorithm` then `iterative_soft_thresholding`, adds the IST result back onto the interpolated signal, and stacks all processed channels back together.
+**Description:** Runs `new_interpolation_algorithm` then `iterative_soft_thresholding` (added onto the interpolated result) sequentially over each channel in `channels.T`, then stacks the processed channels back into a single array.
 **Parameters:**
-- `channels` (`cp.ndarray`): input audio, shape `(n_samples, n_channels)`.
-- `upscale_factor` (`int`): interpolation factor passed through to `new_interpolation_algorithm`.
-- `max_iter` (`int`): IST iteration count passed through to `iterative_soft_thresholding`.
-- `threshold` (`float`): IST threshold passed through to `iterative_soft_thresholding`.
-**Returns:** `cp.ndarray` — upscaled/processed channels, shape `(n_samples * upscale_factor, n_channels)`.
+- `channels` (`cp.ndarray`): input audio channels, shape `(N, C)`.
+- `upscale_factor` (`int`): interpolation factor.
+- `max_iter` (`int`): IST iteration count.
+- `threshold` (`float`): IST threshold.
+**Returns:** `cp.ndarray` — processed/upscaled channels, shape `(N * upscale_factor, C)`.
 **Usage:**
 ```python
-processed = upscale_channels(channels, upscale_factor=4, max_iter=300, threshold=0.6)  # illustrative
+upscaled_channels = upscale_channels(channels, upscale_factor=7, max_iter=300, threshold=0.6)
 ```
 
 ### `normalize_signal(signal) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:494
+**File:** fat_llama/audio_fattener/feed.py:576
 **Kind:** function
-**Description:** Peak-normalizes a signal to the range [-1, 1] (CuPy equivalent of `analysis.py`'s `normalize`).
+**Description:** Peak-normalizes a signal to `[-1, 1]` by dividing by its own maximum absolute value.
 **Parameters:**
-- `signal` (`cp.ndarray`): input signal.
-**Returns:** `cp.ndarray` — peak-normalized signal.
+- `signal` (`cp.ndarray`): input audio signal.
+**Returns:** `cp.ndarray` — normalized signal.
 **Usage:**
 ```python
-normed = normalize_signal(channel)  # illustrative
+normalized = normalize_signal(scaled_upscaled_channels[:, 0])
 ```
 
 ### `apply_original_nyquist_cutoff(signal, original_sample_rate, new_sample_rate) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:507
+**File:** fat_llama/audio_fattener/feed.py:589
 **Kind:** function
-**Description:** Added in **cycle 4** as an unconditional final safety stage. Zeroes all spectral content above the *original* source's Nyquist frequency (`original_sample_rate / 2`) via `cp.fft.rfft` → mask bins by `cp.fft.rfftfreq` → `cp.fft.irfft`, entirely CuPy/CUDA. Per `.claude/rules/project-mission.md`'s "no content above the original Nyquist frequency" hard constraint, fat_llama upscales precision/headroom within the original recording's real bandwidth and does not do bandwidth extension — the band an upsample opens up above the original Nyquist must be actively guaranteed silent, not left as an emergent property of whichever earlier stages (interpolation, IST's harmonic term, autoscale, normalize, LMS) happen to behave well. As of cycle 3's bandlimited interpolation, that band already measures ~-136dB for a real run, so this stage is close to a no-op today — its purpose is to make that a structural guarantee that survives future changes to earlier stages, not to fix a currently-observed defect.
+**Description:** Unconditional final safety stage guaranteeing no spectral content survives above the *original* source's Nyquist frequency (`original_sample_rate / 2`), regardless of what earlier stages did — the hard constraint in `.claude/rules/project-mission.md`. Implemented via `cp.fft.rfft` → zero all bins above the original Nyquist → `cp.fft.irfft`, entirely on CuPy/CUDA.
 **Parameters:**
-- `signal` (`cp.ndarray`): the fully processed signal (single channel), sampled at `new_sample_rate`.
-- `original_sample_rate` (`int`): the original source's sample rate before upscaling; the cutoff is `original_sample_rate / 2`.
-- `new_sample_rate` (`int` or `float`): the sample rate `signal` is actually sampled at (`original_sample_rate * upscale_factor`).
-**Returns:** `cp.ndarray` — `signal` with all content above `original_sample_rate / 2` removed, same length.
+- `signal` (`cp.ndarray`): fully processed single-channel signal, sampled at `new_sample_rate`.
+- `original_sample_rate` (`int`): the source's original sample rate; the cutoff is `original_sample_rate / 2`.
+- `new_sample_rate` (`int|float`): the actual sample rate of `signal`.
+**Returns:** `cp.ndarray` — `signal` with all content above the original Nyquist frequency removed, same length.
 **Usage:**
 ```python
-# From fat_llama/tests/test_feed.py:
-cutoff_signal = apply_original_nyquist_cutoff(
-    signal, original_sample_rate, new_sample_rate
-)
+cutoff_channel = apply_original_nyquist_cutoff(filtered_channel, sample_rate, new_sample_rate)
 ```
 
 ### `compute_upscale_factor(sample_rate, source_bitrate_bps, target_bitrate_kbps) -> int`
-**File:** fat_llama/audio_fattener/feed.py:563
+**File:** fat_llama/audio_fattener/feed.py:645
 **Kind:** function
-**Description:** Added in the issue #20 fix. Derives the integer upscale factor `upscale()` uses, starting from the original ratio (`round(target_bitrate_kbps * 1000 / source_bitrate_bps)`, or `4` if the source bitrate is unknown) but clamping the result so `sample_rate * upscale_factor` never exceeds `MAX_REALISTIC_SAMPLE_RATE_HZ` (192000 Hz) and never drops below `1`. Fixes the prior unbounded derivation, which compared a target value calibrated to compressed-file bitrates (800-1411/800-6444 kbps) directly against the source's own compressed bitrate (e.g. mp3 at 128-192 kbps), routinely landing at a 5-7x+ ratio and driving output sample rates past 250-300 kHz for no real informational gain (`apply_original_nyquist_cutoff` guarantees the vast majority of that extra bandwidth is silence) — reproduced the issue's reported "~250kHz sample rate, ~5300kbps bitrate" symptom exactly, and its inflated sample count was also the dominant multiplier behind the issue's second report (`lms_filter`'s per-sample loop scaling with sample count).
+**Description:** Derives an integer upscale factor as `round(target_bitrate_kbps * 1000 / source_bitrate_bps)` (falling back to `4` if `source_bitrate_bps` is falsy), floored at `1` (never downscales) and clamped so `sample_rate * factor` never exceeds `MAX_REALISTIC_SAMPLE_RATE_HZ` (192 kHz) — closing a gap where unbounded ratios could drive unrealistic (250-300+ kHz) output sample rates.
 **Parameters:**
-- `sample_rate` (`int`): the source audio's sample rate, in Hz.
-- `source_bitrate_bps` (`float` or `None`): the source file's own bitrate in bits/sec, as returned by `read_audio` (`None` if undeterminable).
-- `target_bitrate_kbps` (`int`): the caller's requested target bitrate in kbps (already validated by the caller against the target format's valid range).
-**Returns:** `int` — the upscale factor to use, `>= 1`, bounded so `sample_rate * upscale_factor <= MAX_REALISTIC_SAMPLE_RATE_HZ` whenever `sample_rate` itself is already within that ceiling.
+- `sample_rate` (`int`): source sample rate, Hz.
+- `source_bitrate_bps` (`float|None`): source's own bitrate in bits/sec, or `None`.
+- `target_bitrate_kbps` (`int`): caller-requested target bitrate in kbps (pre-validated by the caller).
+**Returns:** `int` — upscale factor, `>= 1`, such that `sample_rate * factor <= MAX_REALISTIC_SAMPLE_RATE_HZ` whenever `sample_rate` itself is within that ceiling.
 **Usage:**
 ```python
-# From fat_llama/tests/test_feed.py:
-factor = compute_upscale_factor(
-    sample_rate=44100, source_bitrate_bps=128000, target_bitrate_kbps=900
-)  # -> 4 (was 7 before the fix), giving 176400 Hz instead of 308700 Hz
+upscale_factor = compute_upscale_factor(44100, bitrate, 1400)
 ```
 
 ### `upscale(input_file_path, output_file_path, source_format, target_format='flac', max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1411, toggle_normalize=True, toggle_autoscale=True, toggle_adaptive_filter=True) -> None`
-**File:** fat_llama/audio_fattener/feed.py:621
+**File:** fat_llama/audio_fattener/feed.py:703
 **Kind:** function
-**Description:** The package's main public entry point. Validates `target_bitrate_kbps` against per-format ranges (`flac`: 800–1411 kbps, `wav`: 800–6444 kbps), reads the input via `read_audio`, computes the upscale factor via `compute_upscale_factor` (issue #20 fix: bounded to a realistic sample rate, not an unbounded ratio), runs the channel pipeline (`upscale_channels`), optionally autoscales each channel back to its original peak amplitude, optionally normalizes, optionally applies `lms_filter` per channel (using each channel as its own `desired` signal; now block-adaptive, see `lms_filter`), applies `apply_original_nyquist_cutoff` per channel unconditionally (cycle 4, no toggle — always the final processing step), and writes the result via `write_audio` at `sample_rate * upscale_factor`. As of the issue #18 fix, `toggle_normalize` and `audio.max_possible_amplitude` (the source's own bit-depth full-scale value, from `pydub`) are now wired straight through to `write_audio`'s own `normalize`/`reference_amplitude` arguments — previously `write_audio` force-normalized regardless of this flag, so `toggle_normalize=False` had no effect on the actual written output level; it now genuinely preserves the source's relative signal level.
+**Description:** Top-level entry point. Validates `target_bitrate_kbps` against the target format's range, reads the source (`read_audio`), derives `upscale_factor` (`compute_upscale_factor`), runs `upscale_channels` (interpolation + IST), optionally autoscales each channel back to its original peak, optionally normalizes, optionally applies `lms_filter` adaptive filtering, then unconditionally applies `apply_original_nyquist_cutoff` per channel before writing via `write_audio` (with `toggle_normalize` wired through, and `audio.max_possible_amplitude` as the reference amplitude for the `normalize=False` path).
 **Parameters:**
 - `input_file_path` (`str`): path to the input audio file.
-- `output_file_path` (`str`): path to write the processed output.
-- `source_format` (`str`): input format passed to `read_audio` (e.g. `'mp3'`, `'wav'`, `'ogg'`, `'flac'`).
-- `target_format` (`str`): output format, `'flac'` (default) or `'wav'`.
-- `max_iterations` (`int`): IST iteration count (default `300`).
-- `threshold_value` (`float`): IST/LMS threshold (default `0.6`).
-- `target_bitrate_kbps` (`int`): used only to derive `upscale_factor` relative to the source file's own bitrate (default `1411`) via `compute_upscale_factor`; must itself fall within the valid range for `target_format`. As of the issue #20 fix, the derived factor is additionally clamped so the resulting sample rate never exceeds `MAX_REALISTIC_SAMPLE_RATE_HZ` (192 kHz) — previously this alone could drive sample rates well past 250 kHz for realistic inputs. Still not a promise about the output's real bitrate: the output is always uncompressed PCM at an upsampled rate, so its real bitrate is, by design, higher than `target_bitrate_kbps` once `upscale_factor > 1`, though now bounded to a realistic range rather than unbounded.
-- `toggle_normalize` (`bool`): whether to normalize the output (default `True`). As of the issue #18 fix, this now genuinely controls `write_audio`'s final scaling too (see Description) — `False` preserves the source's original relative level (losslessly for `'wav'`, written as 64-bit float; scaled by the source's own full-scale amplitude rather than forced to 0 dBFS for `'flac'`).
-- `toggle_autoscale` (`bool`): whether to rescale output amplitude to match the original (default `True`).
-- `toggle_adaptive_filter` (`bool`): whether to apply `lms_filter` (default `True`).
-**Returns:** `None` — writes the output file as a side effect.
+- `output_file_path` (`str`): path to the output file.
+- `source_format` (`str`): `'mp3'`, `'wav'`, `'ogg'`, or `'flac'`.
+- `target_format` (`str`): `'flac'` (default) or `'wav'`.
+- `max_iterations` (`int`): IST iteration count. Default `300`.
+- `threshold_value` (`float`): IST threshold. Default `0.6`.
+- `target_bitrate_kbps` (`int`): drives `upscale_factor`; must be in `(800, 1411)` for flac or `(800, 6444)` for wav. Default `1411`.
+- `toggle_normalize` (`bool`): controls both the in-pipeline normalize stage and `write_audio`'s own final scaling. Default `True`.
+- `toggle_autoscale` (`bool`): rescale each channel to its original peak after IST. Default `True`.
+- `toggle_adaptive_filter` (`bool`): apply `lms_filter` after normalization. Default `True`.
+**Returns:** `None` — writes the upscaled file to `output_file_path` as a side effect.
 **Usage:**
 ```python
-# From example.py:
 from fat_llama.audio_fattener.feed import upscale
 
 upscale(
@@ -339,163 +230,89 @@ upscale(
 )
 ```
 
-## fat_llama/tests/__init__.py
-
-Empty — no exports.
-
 ## fat_llama/tests/test_feed.py
 
-`unittest`-based test module for `feed.py`, covering `read_audio`, `write_audio`, `lms_filter`'s warm-up behavior (cycle 1), `iterative_soft_thresholding`'s bounded harmonic injection and `upscale`'s `target_bitrate_kbps` contract (cycle 2), `lms_filter`'s genuine self-referential adaptation, and `new_interpolation_algorithm`'s bandlimited-ness (cycle 3), (cycle 4) `apply_original_nyquist_cutoff`'s above-Nyquist suppression both in isolation and wired into `upscale()`, and (issue #20 fix, cycle 1) `compute_upscale_factor`'s realistic-sample-rate bound and `_lms_block_ranges`' partitioning correctness — the latter two are pure-Python and run without a GPU, unlike most of this module's other tests. Issue #20 fix, cycle 2 closed two coverage gaps `audio-quality-checker` found in cycle 1's block-adaptive `lms_filter` rewrite: an end-to-end `upscale()` test with `toggle_adaptive_filter=True` (previously untested at the pipeline level), and tests asserting `lms_filter`'s `block_size=1` exact-equivalence claim and bounding its sequential-iteration count as a function of `block_size` (via `mock.patch.object` instrumentation of `_lms_block_ranges`), and strengthened `test_upscale_end_to_end_with_adaptive_filter_enabled` with container-property (sample-rate/duration) assertions in cycle 3. Issue #20 fix, cycle 4 (a new finding this run surfaced, outside issue #20's literal bitrate/runtime scope but within this project's general audio-quality bar) replaced cycle 3's two harmonic-term tests (`test_ist_harmonic_amplitude_scales_with_signal_peak`, `test_ist_harmonic_term_lands_in_audible_band` — both tested properties of a term cycle 4 removed) with `test_ist_no_static_floor_in_quiet_segment`, a longer two-segment regression test that actually exercises the whole-buffer-FFT failure mode the short single-segment tests it replaces could never have caught. Issue #18 fix, cycle 1 added three tests for `write_audio`'s normalize wiring and WAV output precision: `test_write_audio_normalize_false_preserves_relative_level` and `test_write_audio_wav_uses_64bit_float_and_is_lossless` (both pure-numpy, no GPU needed), and a GPU-gated end-to-end `test_upscale_toggle_normalize_false_preserves_output_level`.
-
-### `TestAudioFattener`
-**File:** fat_llama/tests/test_feed.py:43
-**Kind:** class
-**Description:** `unittest.TestCase` subclass exercising `read_audio`/`write_audio`. `setUp` generates a 1-second 440 Hz sine wave as `test_input.mp3` via `pydub.generators.Sine`; `tearDown` removes the generated MP3 and any leftover `output_processed.flac`.
+### `_cuda_gpu_available() -> bool`
+**File:** fat_llama/tests/test_feed.py:21
+**Kind:** function
+**Description:** Checks for a functional CUDA-capable GPU via `cp.cuda.runtime.getDeviceCount() > 0`, returning `False` on any exception. Used to skip GPU-dependent tests cleanly on CPU-only CI runners rather than crashing, per the project's CUDA-only-with-no-fallback design.
+**Returns:** `bool`.
 **Usage:**
 ```python
-python -m pytest fat_llama/tests/test_feed.py -v
+GPU_AVAILABLE = _cuda_gpu_available()
 ```
 
-#### `TestAudioFattener.setUp(self) -> None`
-**File:** fat_llama/tests/test_feed.py:45
-**Kind:** method
-**Description:** Creates a fresh test MP3 (`test_input.mp3`) before each test via `create_test_mp3`. Inferred from body (no docstring).
-**Returns:** `None`.
+### `class TestAudioFattener(unittest.TestCase)`
+**File:** fat_llama/tests/test_feed.py:44
+**Kind:** class
+**Description:** The project's test suite for `fat_llama.audio_fattener.feed`. `setUp`/`tearDown` create and remove a synthetic 1-second 440 Hz sine-wave MP3 fixture. Non-GPU tests (`test_read_audio`, `test_write_audio`, `test_write_audio_normalize_false_preserves_relative_level`, `test_write_audio_wav_uses_64bit_float_and_is_lossless`, `test_compute_upscale_factor_bounds_realistic_sample_rate`, `test_lms_block_ranges_partitions_range_exactly`) run unconditionally; everything else is decorated `@requires_gpu` and exercises `lms_filter`, `iterative_soft_thresholding`, `new_interpolation_algorithm`, `apply_original_nyquist_cutoff`, and end-to-end `upscale()` behavior (Nyquist cutoff, adaptive filter wiring, `toggle_normalize`, `target_bitrate_kbps`-driven factor bounds). No test currently asserts that the *upscaled* output content resembles the *source* content beyond dominant-frequency checks (no decimate-and-correlate coherence test, unlike the fftw sibling package's test suite).
+**Usage:**
+```python
+python -m unittest fat_llama.tests.test_feed
+```
 
-#### `TestAudioFattener.tearDown(self) -> None`
-**File:** fat_llama/tests/test_feed.py:50
-**Kind:** method
-**Description:** Deletes `test_input.mp3` and `output_processed.flac` if present, after each test. Inferred from body (no docstring).
-**Returns:** `None`.
+## analysis.py
 
-#### `TestAudioFattener.create_test_mp3(self, filename) -> None`
-**File:** fat_llama/tests/test_feed.py:57
-**Kind:** method
-**Description:** Synthesizes a 1-second 440 Hz sine wave with `pydub.generators.Sine` and exports it as an MP3 to `filename`, then explicitly closes the file handle `export()` returns (cycle 2 fix — `pydub` does not close it, previously leaking an open file descriptor per test).
+Standalone (not imported by `fat_llama`) spectrogram/waveform comparison script; imports `cupy` for its GPU cross-correlation/FFT steps.
+
+### `read_mp3(file_path) -> (np.ndarray, int)`
+**File:** analysis.py:8
+**Kind:** function
+**Description:** Reads an MP3 via `pydub`, converts to mono by averaging channels if stereo.
 **Parameters:**
-- `filename` (`str`): output path for the generated test MP3.
-**Returns:** `None`.
+- `file_path` (`str`): path to the MP3 file.
+**Returns:** `(data, frame_rate)`.
+**Usage:**
+```python
+mp3, sample_rate_mp3 = read_mp3('input_test.mp3')
+```
 
-#### `TestAudioFattener.test_read_audio(self) -> None`
-**File:** fat_llama/tests/test_feed.py:67
-**Kind:** method
-**Description:** Asserts `read_audio` on the generated sine-wave MP3 returns a 44100 Hz sample rate and 44100 samples (1 second); that a mono source comes back as a flat 1-D array (`audio.channels == 1`, `samples.ndim == 1`) rather than reshaped to `(N, 2)`; that duration is 1000 ms; that the mp3-reported bitrate falls within the encoder's default CBR band (32000–320000, not a single hard-coded value); and that the samples actually carry signal — non-silent, all-finite, and (via windowed FFT) a dominant spectral peak within 5 Hz of 440 Hz.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
+### `read_flac(file_path) -> (np.ndarray, int)`
+**File:** analysis.py:16
+**Kind:** function
+**Description:** Reads a FLAC via `soundfile`, converts to mono by averaging channels if stereo.
+**Parameters:**
+- `file_path` (`str`): path to the FLAC file.
+**Returns:** `(data, sample_rate)`.
+**Usage:**
+```python
+flac, sample_rate_flac = read_flac('output_test.flac')
+```
 
-#### `TestAudioFattener.test_write_audio_normalize_false_preserves_relative_level(self) -> None`
-**File:** fat_llama/tests/test_feed.py:197
-**Kind:** method
-**Description:** Issue #18 regression test (pure-numpy, no GPU needed). Writes the same raw-PCM-scale sine tone via `write_audio` twice — once with `normalize=True` and once with `normalize=False, reference_amplitude=32768.0` — and asserts `normalize=True` still peak-normalizes to full scale (backward compatible), while `normalize=False` produces a peak matching `original_peak / reference_amplitude` (not full scale), catching the prior bug where `write_audio` force-normalized regardless of the flag.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
+### `normalize(signal) -> np.ndarray`
+**File:** analysis.py:22
+**Kind:** function
+**Description:** Peak-normalizes a signal to `[-1, 1]`.
+**Parameters:**
+- `signal` (`np.ndarray`): input signal.
+**Returns:** `np.ndarray`.
+**Usage:**
+```python
+normalized = normalize(mp3)
+```
 
-#### `TestAudioFattener.test_write_audio_wav_uses_64bit_float_and_is_lossless(self) -> None`
-**File:** fat_llama/tests/test_feed.py:265
-**Kind:** method
-**Description:** Issue #18 regression test (pure-numpy, no GPU needed). Writes a sine tone to `.wav` via `write_audio(normalize=False, ...)` and asserts the resulting file's `soundfile.info().subtype == 'DOUBLE'` and that reading it back reproduces the pre-write float64 values exactly (bit-for-bit, no quantization), confirming WAV output now uses libsndfile's true 64-bit float subtype instead of `PCM_24`.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
+### `compare_signals(mp3, flac, sample_rate) -> None`
+**File:** analysis.py:25
+**Kind:** function
+**Description:** Normalizes and length-matches `mp3`/`flac`, then plots (via `matplotlib`) a waveform comparison, difference signal, prints MSE, plots spectrograms (via `scipy.signal.spectrogram`), a GPU cross-correlation (`cp.correlate`), and a GPU FFT frequency-domain comparison (`cp.fft.fft`).
+**Parameters:**
+- `mp3` (`np.ndarray`): decoded MP3 samples.
+- `flac` (`np.ndarray`): decoded FLAC samples.
+- `sample_rate` (`int`): shared sample rate.
+**Returns:** `None` (side effect: displays plots, prints stats).
+**Usage:**
+```python
+compare_signals(mp3, flac, sample_rate)  # illustrative
+```
 
-#### `TestAudioFattener.test_write_audio(self) -> None`
-**File:** fat_llama/tests/test_feed.py:97
-**Kind:** method
-**Description:** Reads the generated sine-wave MP3, writes it out as FLAC via `write_audio`, then asserts real coherence of the round-trip: output file exists; `soundfile.info` reports the same sample rate/channel count and a duration matching the ~1 s input within 0.05 s tolerance; the re-read written data is non-silent and all-finite; the written waveform correlates >0.999 with the peak-normalized input (guards against a test that would pass for any arbitrary non-silent signal, not necessarily the true written waveform); the dominant spectral peak is still within 5 Hz of 440 Hz; and fewer than 5% of written samples sit at full-scale clipping (`> 0.999`), guarding against `write_audio` handing raw (non-normalized, PCM-scale) samples straight to an integer `soundfile` subtype. As of the cycle 1 fix to `write_audio`, this test passes. Cleans up `test_output.flac` in a `finally` block.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
+## example.py
 
-#### `TestAudioFattener.test_compute_upscale_factor_bounds_realistic_sample_rate(self) -> None`
-**File:** fat_llama/tests/test_feed.py:170
-**Kind:** method
-**Description:** Added in the issue #20 fix as a regression test for `compute_upscale_factor` — not GPU-gated, since the function under test is pure Python. Checks the issue's own reported scenarios plus nearby cases (`(source_bitrate_bps, target_bitrate_kbps)` pairs `(128000, 900)`, `(192000, 1400)`, `(64000, 800)`, `(320000, 1411)` at `sample_rate=44100`) and asserts every derived factor is `>= 1` and keeps `sample_rate * factor <= MAX_REALISTIC_SAMPLE_RATE_HZ` (192000 Hz) — the old formula drove several of these past 300 kHz. Also checks edge cases: unknown source bitrate (`None`) still falls back to a bounded factor; an already-high-bitrate source clamps to a factor of `1` rather than a fractional/zero value; a source sample rate already at the realistic ceiling is not upscaled further.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
+Top-level script (no functions/classes) — calls `fat_llama.audio_fattener.feed.upscale` with `input_file_path='input_test.mp3'`, `output_file_path='output_test.flac'`, `source_format='mp3'`, `target_format='flac'`, `max_iterations=300`, `threshold_value=0.6`, `target_bitrate_kbps=1400`, and all three toggles `True`.
 
-#### `TestAudioFattener.test_lms_block_ranges_partitions_range_exactly(self) -> None`
-**File:** fat_llama/tests/test_feed.py:230
-**Kind:** method
-**Description:** Added in the issue #20 fix as a regression test for `_lms_block_ranges` — not GPU-gated. For several `(start, n, block_size)` combinations (including edge cases like `n == start` and `block_size == 1`), asserts the yielded `(block_start, block_end)` pairs exactly cover `range(start, n)` with no gaps or overlaps, and every block is at most `block_size` long.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
+## fat_llama/__init__.py, fat_llama/audio_fattener/__init__.py, fat_llama/tests/__init__.py
 
-#### `TestAudioFattener.test_lms_filter_no_extended_warmup_dropout(self) -> None`
-**File:** fat_llama/tests/test_feed.py:272
-**Kind:** method
-**Description:** Added in cycle 1 as a regression test for `lms_filter`'s warm-up fix. Builds a 50ms two-tone synthetic signal (300 Hz + 900 Hz), runs `lms_filter(signal, signal, mu=0.001, num_taps=32)`, and checks the RMS of the filtered output over the 50 samples immediately following the first `num_taps` against the RMS of the input signal over that same window — asserting the ratio exceeds 0.5. Guards against `lms_filter` ramping up from a zero-initialized state instead of tracking the signal from (near) the first sample; production symptom before the fix was a ~200ms, -82 dBFS dropout at the head of upscaled audio with no corresponding silence in the source.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
+Empty package marker files — no functions/classes.
 
-#### `TestAudioFattener.test_ist_harmonic_injection_bounded_across_iterations(self) -> None`
-**File:** fat_llama/tests/test_feed.py:311
-**Kind:** method
-**Description:** Added in cycle 2 as a regression test for `iterative_soft_thresholding`'s bounded-harmonic fix. Builds a synthetic two-tone signal (300 Hz + 700 Hz, n=2000), runs `iterative_soft_thresholding` at `max_iter=5` and again at `max_iter=150`, and asserts the 150-iteration run's peak magnitude is less than 2x the 5-iteration run's — guarding against the harmonic-injection term accumulating roughly linearly with `max_iter` instead of staying bounded (production symptom before the fix: a measured +6.12 dB broadband noise-floor rise).
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
+## Other tracked files (not factblocked — non-source)
 
-#### `TestAudioFattener.test_lms_filter_self_referential_call_genuinely_adapts(self) -> None`
-**File:** fat_llama/tests/test_feed.py:347
-**Kind:** method
-**Description:** Added in cycle 3 as a regression test for `lms_filter`'s decorrelation-delay fix. Runs `lms_filter(signal, signal, mu=0.001, num_taps=32, return_weights=True)` on a 200ms two-tone signal (300 Hz + 900 Hz) and asserts three things: the final tap weights differ from the `[1,0,...,0]` identity init (proves adaptation happened), the filtered output is not bit-identical to the input over the post-warm-up region (the direct symptom of the cycle 3 no-op bug), and the warm-up RMS ratio still exceeds 0.5 (proves the delay fix didn't reintroduce the cycle 1 dropout).
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_lms_filter_block_size_one_matches_reference_per_sample_update(self) -> None`
-**File:** fat_llama/tests/test_feed.py:416
-**Kind:** method
-**Description:** Added in cycle 2 (issue #20 fix) as a regression test for `lms_filter`'s block-adaptive rewrite's own docstring claim that `block_size=1` reproduces the exact prior per-sample update. Builds an independent per-sample-loop reference LMS implementation (same `w` init, `delay` convention, and `2 * mu * e * x` update rule, no block averaging) and asserts `lms_filter(..., block_size=1, return_weights=True)`'s filtered output and final weights match that reference to `atol=1e-9` on a 50ms two-tone (300/900 Hz) signal.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_lms_filter_block_size_bounds_sequential_iterations(self) -> None`
-**File:** fat_llama/tests/test_feed.py:484
-**Kind:** method
-**Description:** Added in cycle 2 (issue #20 fix) as a regression test guarding the runtime fix itself, not just its output values: asserts `lms_filter`'s default `block_size` is `256` (via `inspect.signature`), then instruments `_lms_block_ranges` (via `mock.patch.object` on the `feed` module, counting calls) across two `lms_filter` runs on a 200ms two-tone signal — asserts the `block_size=256` run performs `ceil((n-start)/256)` sequential iterations, the `block_size=1` run performs exactly `n-start` (one per sample), and the former is at least ~100x fewer than the latter. Guards against a regression that silently reverts to per-sample-only updates (which would pass every other test in this module, since they only check output values) while quietly reintroducing issue #20's original runtime defect.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_ist_no_static_floor_in_quiet_segment(self) -> None`
-**File:** fat_llama/tests/test_feed.py:562
-**Kind:** method
-**Description:** Added in cycle 4 (issue #20 fix), replacing the now-removed `test_ist_harmonic_amplitude_scales_with_signal_peak` and `test_ist_harmonic_term_lands_in_audible_band` (both tested properties of the harmonic-reconstruction term this cycle removed). Regression test for the static-drone finding: builds a two-segment buffer (a loud 400 Hz second followed by a much quieter 400 Hz second, both at real-PCM-like amplitude), runs `iterative_soft_thresholding` and combines its output the way `upscale_channels` actually does (`data + ist_changes`, not IST's output standalone), then asserts the quiet segment's RMS doesn't rise more than 4x (12 dB) from its pre-IST level — a generous bound that allows this function's own separately-documented near-lossless-round-trip "doubling" effect without allowing a large content-independent static floor (the cycle 3 regression measured a >50 dB rise in an equivalent case). The test this replaces only ever exercised a short single-segment `n=2000` buffer, where one dominant bin is genuinely representative of the whole signal — it could never have caught this whole-buffer-FFT failure mode.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_new_interpolation_algorithm_is_bandlimited(self) -> None`
-**File:** fat_llama/tests/test_feed.py:632
-**Kind:** method
-**Description:** Added in cycle 3 as a regression test for `new_interpolation_algorithm`'s bandlimited-interpolation fix. Upsamples a synthetic 300 Hz tone (0.1s @ 44100 Hz) by `upscale_factor=7` and asserts: output length is `n * upscale_factor` and all-finite; peak spectral energy above the original Nyquist frequency is less than 1e-4x the below-Nyquist peak (guards against zero-order-hold imaging, which would put comparable energy at mirrored image frequencies); and the dominant below-Nyquist frequency is still within 5 Hz of the source's 300 Hz.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_apply_original_nyquist_cutoff_removes_above_nyquist_content(self) -> None`
-**File:** fat_llama/tests/test_feed.py:687
-**Kind:** method
-**Description:** Added in cycle 4 as a regression test for `apply_original_nyquist_cutoff`. Builds a synthetic 50ms signal with a 300 Hz in-band tone and a 30000 Hz tone above the original 22050 Hz Nyquist (simulating artifact energy a future upstream stage might reintroduce), sanity-checks the synthetic signal genuinely carries comparable energy in both bands before the cutoff, then asserts: the above-Nyquist peak drops to below `1e-6` of the pre-cutoff in-band peak; the in-band tone survives within 5% of its original amplitude; the output length and finiteness are preserved; and the dominant frequency is still the 300 Hz in-band tone.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_upscale_no_content_above_original_nyquist_frequency(self) -> None`
-**File:** fat_llama/tests/test_feed.py:770
-**Kind:** method
-**Description:** Added in cycle 4 to confirm `apply_original_nyquist_cutoff` is actually wired into `upscale()`'s public entry point, not just correct in isolation. Runs a full `upscale()` call at two different `target_bitrate_kbps` values (800 and 1400, giving two different `upscale_factor`s) with `max_iterations=2` and `toggle_adaptive_filter=False` to stay fast, using `target_format='wav'` (this source's bitrate/target combination can drive an `upscale_factor` that pushes FLAC's output sample rate past libsndfile's ~655350 Hz format ceiling — a pre-existing, unrelated limitation, not a defect in this fix). For each run, asserts the peak spectral energy above the original 22050 Hz Nyquist is below `1e-4` of the in-band peak. As of cycle 5 (strengthened by `audio-quality-checker`), also asserts there actually *is* an above-Nyquist band to check (`upscale_factor > 1`) rather than silently skipping the check when there isn't — both bitrates in this test drive `upscale_factor` well above 1 against this source's deterministic bitrate, so an empty band would itself indicate a regression worth surfacing, not a case to pass over quietly.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_upscale_end_to_end_with_adaptive_filter_enabled(self) -> None`
-**File:** fat_llama/tests/test_feed.py:845
-**Kind:** method
-**Description:** Added in cycle 2 (issue #20 fix) to close a coverage gap flagged by `audio-quality-checker`: every other end-to-end `upscale()` test uses `toggle_adaptive_filter=False` to stay fast, so the exact stage issue #20 was about (and cycle 1 rewrote as block-adaptive) had zero pipeline-level coverage — only isolated `lms_filter` unit tests (built directly against synthetic arrays, never routed through `upscale()`) exercised it. Runs a real `upscale()` call (`max_iterations=2`, `target_bitrate_kbps=800`, `toggle_adaptive_filter=True`) and asserts the adaptive-filtered output is all-finite, non-silent (RMS > 1e-3), has fewer than 5% full-scale-clipped samples, and its dominant spectral peak is still within 10 Hz of the source's 440 Hz tone — catching a wiring regression in `upscale()`'s `lms_filter` call that an isolated unit test would miss. **Strengthened in cycle 3** by `audio-quality-checker`: added assertions that the output sample rate matches `44100 * compute_upscale_factor(...)` (and stays within `MAX_REALISTIC_SAMPLE_RATE_HZ`) and that duration is preserved (~1s) — the original version checked sample *values* but nothing about container properties, so a length/rate-changing regression in the LMS stage (e.g. a block-partitioning off-by-one at the tail) would have gone uncaught.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_target_bitrate_kbps_drives_bounded_realistic_upscale_factor(self) -> None`
-**File:** fat_llama/tests/test_feed.py:942
-**Kind:** method
-**Description:** Added in cycle 2 (as `test_target_bitrate_kbps_drives_upscale_factor_not_output_bitrate`, documenting the *old* unbounded-ratio contract) and rewritten in the issue #20 fix, since that old contract was itself the defect the issue reported. Runs a full `upscale()` call (`max_iterations=2`, `toggle_adaptive_filter=False` to stay fast, `target_bitrate_kbps=1400` — deliberately near the top of the valid flac range, the kind of value that used to drive an oversized factor, e.g. `round(1400/192)=7`) and asserts, via the real `compute_upscale_factor()`: the output sample rate matches `source_sample_rate * compute_upscale_factor(...)` and stays within `MAX_REALISTIC_SAMPLE_RATE_HZ`; duration is preserved (~1s); the output is mono, all-finite, non-silent (RMS > 1e-3), has fewer than 5% full-scale-clipped samples, and its dominant spectral peak is still within 5 Hz of the source's 440 Hz tone. Replaces the old test's assertion that the real output bitrate *must* exceed 2x `target_bitrate_kbps` (that divergence was the bug, not a documented contract to protect).
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-#### `TestAudioFattener.test_upscale_toggle_normalize_false_preserves_output_level(self) -> None`
-**File:** fat_llama/tests/test_feed.py:1094
-**Kind:** method
-**Description:** Issue #18 end-to-end regression test, `@requires_gpu`-gated (routes through the real `upscale()`). Uses a deliberately-attenuated (~-20 dBFS) source fixture, since the module's shared default fixture is already near full scale and would make a normalize-off/on comparison vacuous. Runs `upscale()` twice (`toggle_normalize=True` vs `False`, otherwise identical args) and asserts the `True` run's output peak lands near full scale while the `False` run's output peak reflects the source's own quieter relative level instead — confirming the `write_audio`/`upscale` wiring fix (see their factblocks above) holds through the whole pipeline, not just at the `write_audio` unit level. Not yet confirmed on an actual GPU in this sandbox (no local CUDA device); `generate-code` verified it indirectly via a numpy/cupy-shim stand-in using unmodified source.
-**Returns:** `None` — raises `AssertionError` on failure via `unittest` assertions.
-
-## Notes
-
-- `factblock_stale` / inconsistencies observed while reviewing (not fixed by this skill — report only):
-  - `setup.py`'s `console_scripts` entry point (`example=example:main`) references `example.main`, but `example.py` defines no `main` function — it only has top-level script code. This entry point would fail if invoked as an installed console script. Flagged by code-tester-reviewer and generate-code in iterate-fat-llama cycle 1; left unfixed both times as out of scope (setup.py sits outside `fat_llama/**`).
-  - `setup.py`'s `version` (`1.4.0`) does not yet reflect this iterate-fat-llama run's in-progress cycles (branch `iterate-fat-llama/20260906-044742`, resolving GitHub issue #20, off `Issue-no-20-unrealistic-final-bitrate-fixing`) — the version bump happens in that skill's own Step 6, after cycling completes.
-  - `analysis.py` imports `cupy` unconditionally at module load, same as `feed.py` — both modules require a CUDA-capable GPU/environment to import successfully at all, not just to run GPU-specific code paths.
-  - `new_interpolation_algorithm`'s zero-order-hold interpolation issue (investigated and left unfixed in cycles 1-2) was **fixed in cycle 3** — replaced with FFT-domain bandlimited interpolation (see its factblock above).
-  - `iterative_soft_thresholding`'s `threshold` parameter is an absolute cutoff applied to raw-PCM-scale/raw-FFT-magnitude data, which real audio's actual scale (~1e4-1e5) dwarfs — masking barely triggers at the conventional default `threshold=0.6`, so IST's "keep significant frequencies" mechanism is mostly a near-lossless FFT/IFFT round trip beyond the harmonic term (see its factblock above). Investigated and documented in cycle 3, deliberately not fixed — flagged as a strong next-cycle candidate (convert to a peak-relative fraction).
-  - `iterative_soft_thresholding` used to add a synthetic sinusoidal "harmonic-reconstruction" term each iteration, on top of the plain FFT-threshold-IFFT round trip. Its history: originally spanned exactly one sine cycle across the *entire* buffer regardless of sample rate (`cp.sin(cp.linspace(0, 2*pi, len(data_thres)))`), landing at a ~0.066 Hz subsonic oscillation for a real ~15s buffer (found in an earlier, pre-this-run cycle 4 by `audio-quality-checker`: 4.87% of peak amplitude concentrated there; a pre-this-run attempt to fix it by extrapolating content above the original Nyquist was redirected mid-run once the "no content above original Nyquist" hard constraint was established — see `apply_original_nyquist_cutoff` above). Re-measured in this run's cycle 3 at -26.2 dBFS as the sole remaining driver of the spectral-deviation score; cycle 3's fix derived the frequency from the dominant retained FFT bin each iteration instead, but that turned out to still be static across a real multi-second buffer (a whole-buffer FFT has one global dominant bin), producing a constant 98.168 Hz drone that collapsed measured dynamic range from 57.1 dB to 25.4 dB. **This run's cycle 4 removed the harmonic term entirely** rather than attempting a fourth revision — `iterative_soft_thresholding` now performs only the plain textbook IST round trip. See its factblock above for the full removal rationale; a properly time-varying/locally-gated reintroduction remains a legitimate but unverified future direction. Real-GPU confirmation of cycle 4's fix is still open as of this cycle (verified only via a numpy stand-in, same environmental limitation as cycles 1-4 generally).
-  - The full baseline `upscale()` pipeline (max_iterations=300, real ~15s input_test.mp3, both channels) took roughly 20-21 minutes end to end pre-cycle-3, ~91% of it in `lms_filter`'s per-sample Python loop; `new_interpolation_algorithm`'s cycle 3 rewrite made interpolation itself ~1000x faster (was the second-largest cost). Measured again just before the issue #20 fix (audio-quality-checker, this run's cycle 1): 27.5 minutes wall clock for a 15.2s stereo source at the (then-oversized) 7x-upscaled sample count. **Resolved and confirmed on a real GPU in this run's cycle 2**: with the issue #20 block-adaptive rewrite (default `block_size=256`) live, the *entire* remote baseline job (`toggle_adaptive_filter=True`, GPU provisioning + clone + deps + the actual pipeline run) completed in 3m05s total — the runtime half of issue #20 is resolved end to end, not just in isolated unit-test math.
-  - `lms_filter`'s block-adaptive rewrite (issue #20) trades exact per-sample accuracy for speed via its `block_size` parameter (default `256`; `1` reproduces the exact prior per-sample update). Validated against a live coherence score in this run's cycle 2 (audio-quality-checker's baseline config uses `toggle_adaptive_filter=True`): coherence 9.0/spectral_deviation 9.0, same as cycle 1's pre-block-adaptive baseline — no regression attributable to this stage so far. If a future run does show one, reducing `block_size` is the first thing to try.
-  - **Issue #18, cycle 1** (`generate-code`): confirmed `toggle_normalize=False` was effectively decorative — `write_audio` force-normalized to full scale regardless of the flag — and fixed it (see `write_audio`/`upscale` factblocks above). Confirmed FFmpeg's `-drc_scale 0` (issue #18 item 3) was already applied on mp3 decode since v1.1.0 (`feed.py:46`), unrelated to this issue — no change needed. Confirmed internal computation is already float64/complex128 throughout; the one real precision gap was the final `write_audio` step, now using WAV's `DOUBLE` subtype (64-bit float, lossless) instead of `PCM_24` — FLAC has no float/double subtype in libsndfile, so `PCM_24` remains FLAC's real ceiling, not an unfixed gap. Issue #18 item (4) (dequantization-method investigation) was not acted on this cycle; the existing IST absolute-threshold-scale note directly above remains the strongest concrete lead for a future cycle.
-  - `compute_upscale_factor`'s new realistic-sample-rate ceiling (`MAX_REALISTIC_SAMPLE_RATE_HZ = 192000`) means `target_bitrate_kbps` now often saturates at the same clamped factor (e.g. 4x for a typical 44.1kHz mp3 source) across much of its documented 800-1411/800-6444 kbps valid range, rather than driving a distinct factor at every value in that range — an intentional, disclosed consequence of prioritizing a realistic output (flagged by `generate-code` as a candidate for a future cycle to reconsider `target_bitrate_kbps`'s valid-range bounds themselves, a separate/larger discussion than the issue #20 fix).
-  - **Closed in this run's cycle 2**: `test_upscale_end_to_end_with_adaptive_filter_enabled` now exercises `upscale()` end-to-end with `toggle_adaptive_filter=True` (mono, small `max_iterations`) — flagged repeatedly since cycles 3-4 as a gap, and made practical to add by the issue #20 block-adaptive rewrite (was impractical to test at all when `lms_filter` was an unvectorized per-sample loop). Not yet stereo, though: no test exercises `upscale()` end-to-end with both `toggle_adaptive_filter=True` and a stereo source together — still a gap for a future cycle. This new test is `@requires_gpu`-gated like most of this module and has not yet been confirmed to pass on an actual GPU in this sandbox (no local CUDA device); `generate-code` verified it indirectly via a numpy/cupy-shim stand-in using unmodified source.
-  - The repo-root reference `input_test.flac` (used by `audio-quality-checker`'s spectral-deviation and — as of the coherence-methodology fix — coherence scoring) is itself a zero-order-hold-duplicated derivative of `input_test.mp3` (confirmed independently in cycles 2, 3, and 4; reconfirmed this run's cycle 1 — `test_reference_input_flac_is_clean_above_nyquist` failed, measuring -57.2 dB content at 37298 Hz), not an independent ground-truth master — flagged repeatedly as structurally unfixable by `generate-code` (the asset sits outside `fat_llama/**`), a ceiling on both scores' meaningfulness until a human replaces the reference asset with a genuine independent high-resolution master of the same source. Cycle 4's spectrogram comparison visibly shows this reference's own legacy zero-order-hold imaging (~44.1/88.2/132.3 kHz mirror bands) — the new pipeline output itself no longer has this artifact.
+`.gitignore`, `.mcp.json`, `CHANGELOG.md`, `LICENSE`, `Manifest.in`, `README.md`, `requirements.txt`, `setup.py` (current `version='1.4.4'`), `input_test.mp3`, `input_test.flac`, `output_test.flac`, `docs/images/logo.jpg`, `docs/images/spectrogram_comparison.png`, `docs/images/theory.png`.

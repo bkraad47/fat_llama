@@ -1,0 +1,56 @@
+### [03:16:35 UTC] Step 0.1 — mission context
+Input: user request (args): "lets look at optimizations from the fftw https://github.com/bkraad47/fat_llama_fftw version and apply them here were aiming to release version 2"
+Action: Read README.md in full at repo root, plus .claude/rules/project-mission.md and .claude/rules/scope-and-safety.md (already surfaced in system context) and .claude/skills/rules/iterate-fat-llama.md.
+Reasoning: Required before Step 0 per SKILL.md and project-mission.md — carries mp3->flac/IST-FFT/CUDA-only/no-AI-upscaling constraints into every generate-code dispatch this run.
+Output: Context loaded. DIRECTIVES stored verbatim: "lets look at optimizations from the fftw https://github.com/bkraad47/fat_llama_fftw version and apply them here were aiming to release version 2". Noted this references CPU-only sibling package fat_llama_fftw (bkraad47/fat_llama_fftw) — per project-mission.md this fat_llama repo is CUDA/CuPy-only; will treat fftw repo purely as a source of *algorithmic/DSP* optimization ideas to port, not as license to add CPU-only code paths or make CUDA optional.
+
+### [03:17:00 UTC] Step 0.2 — uncommitted changes check
+Input: `git status --porcelain`
+Action: Ran git status; only untracked file is this run's own new log file under .claude/log/.
+Reasoning: Per Step 0.2, must stop and ask if there are uncommitted changes not made by this run. The only diff is the log file this run just created itself, which is not in-progress user work.
+Output: Clean — safe to proceed without asking the user.
+
+### [03:17:05 UTC] Step 0.3-0.5 — record base state, branch decision, tag iter-0
+Input: current branch/HEAD from git.
+Action: BASE_BRANCH=v-2.0.0, BASE_COMMIT=5469ec42f0e6ef9deadc9ff9dfcf2c1690807d8a (setup.py version currently 1.4.4). BASE_BRANCH is already a single-purpose version-prep branch (not main/shared) so staying on it directly per Naming conventions common case — no isolated iterate-fat-llama/<timestamp> branch created. Tagged current HEAD as v-2.0.0/iter-0 (candidate C_0).
+Reasoning: v-2.0.0 branch already exists solely for this version-2 prep work; creating a second branch would only add confusing proliferation per the rules file.
+Output: BASE_BRANCH=v-2.0.0, BASE_COMMIT=5469ec4, tag v-2.0.0/iter-0 created successfully.
+
+### [03:20:00 UTC] Step 0 (extended) — research bkraad47/fat_llama_fftw for portable optimizations
+Input: DIRECTIVES (verbatim): "lets look at optimizations from the fftw https://github.com/bkraad47/fat_llama_fftw version and apply them here were aiming to release version 2"
+Action: Used `gh api` (read-only, public repo) to pull fat_llama_fftw's CHANGELOG.md, setup.py, feed.py, test_feed.py, CURRENT_STATE.md into the scratchpad directory (outside this repo's write scope) and read them in full. This is groundwork, not a generate-code write: generate-code has no WebFetch/network tool, so the coordinator must extract concrete, CUDA-portable findings up front and hand them over as reference material alongside DIRECTIVES (kept separate and unmodified from DIRECTIVES itself, so DIRECTIVES doesn't drift per the DIRECTIVES-handling rule).
+Reasoning: fat_llama_fftw is the CPU/pyfftw sibling package, built and iterated by the same skill framework (its own .claude/ rules mirror this repo's), so its CHANGELOG documents a real, independently-verified history of algorithmic fixes to the *same* upscale() pipeline. Per project-mission.md, only DSP/algorithmic ideas are portable here — anything CPU-thread-specific (pyfftw `threads=` multi-threading) or a CPU-only dependency swap must be re-evaluated for the CUDA/CuPy-only path, not copied verbatim.
+Output: FFTW_OPTIMIZATION_FINDINGS (frozen reference, to be passed unmodified alongside DIRECTIVES into every generate-code dispatch this run):
+  1. **Peak-relative IST threshold.** fat_llama's own iterative_soft_thresholding docstring already flags this as a known, unfixed issue (cycle 4: threshold_value is compared against raw magnitudes, not scaled to the signal's own peak, so IST barely sparsifies real audio). fftw fixed this: initialize_ist masks `abs(data) > threshold * peak(data)`; each iteration's FFT-domain mask uses `abs(fft) > threshold * peak(fft)`. Also always excludes the DC bin (index 0) from the FFT-domain mask (asymmetric transients can otherwise make DC the single loudest bin, injecting a DC offset/drone).
+  2. **IST convergence early-exit.** fftw's _ist_chain stops the max_iter loop early once a pass changes the estimate by less than a relative tolerance (1e-6 of the chain's own initial scale) — hard-threshold IST is a fixed-point projection, so later iterations after convergence are provably wasted compute. Directly portable to the CUDA loop.
+  3. **Block/WOLA local IST instead of one whole-buffer FFT per iteration.** fftw's biggest quality fix: thresholding the *whole file* against one global peak lets the single loudest moment dominate the cutoff, leaving quieter passages/other bands with no measurable added detail (this is likely why fat_llama's own coherence notes "safe, transparent... rather than clearly measurable added detail"). fftw processes signals longer than block_size=8192 as 50%-overlap sqrt-Hann-windowed blocks (STFT-style), runs the (converging) IST chain per block, then reconstructs via weighted overlap-add (WOLA, windowed on both analysis and synthesis side to avoid block-boundary clicks) with a window-shaped (not flat-scalar) DC-leak correction per block. This is the change most likely to produce genuinely measurable added detail rather than a transparent pass-through, but is also the riskiest/most involved to port correctly (multiple sub-bugs were found and fixed across fftw's own cycles 2-5 for this exact feature: DC dominance, un-tapered block edges/clicking, flat-scalar DC correction re-opening the click).
+  4. **Cap IST's contribution to the pre-IST baseline peak.** fftw's _cap_ist_changes_to_baseline_peak rescales (bounded, max_rounds=20 iterative shrink) the combined interpolated+IST signal so its peak never exceeds the plain-interpolation baseline's own peak — otherwise IST's own peak growth gets "spent" out of every frequency (not just the ones IST boosted) at the final normalize, causing measured net attenuation (up to ~1.3dB) in bands IST never touched.
+  5. Channel-level concurrency (ThreadPoolExecutor over stereo channels) and multi-threaded pyfftw for large-signal Nyquist cutoff are CPU/GIL-specific — NOT directly portable to CUDA/CuPy (cp.fft is already GPU-parallel internally); flagged as out of scope for a direct port, per project-mission.md's CUDA-only constraint. If channel throughput is worth revisiting, that would mean investigating CUDA streams, a distinct CUDA-native investigation, not a copy of this technique.
+  6. read_audio's pydub->soundfile migration (simpler deps, no ffmpeg subprocess, correct N-channel shape instead of a hardcoded 2-channel reshape) is a plausible but riskier port (MP3-via-soundfile depends on libsndfile version/build); flagged as a candidate for generate-code to evaluate empirically against this repo's actual test fixtures, not a mandatory change.
+  7. fftw's own compute_upscale_factor has NO upper clamp (confirmed via its own 1.4.5 changelog entry) — fat_llama's version is already ahead here (MAX_REALISTIC_SAMPLE_RATE_HZ clamp); nothing to port for this piece.
+  8. Testing: fftw added a real unmocked end-to-end FLAC-write test and a decimate-back-and-correlate source/output coherence test in its own test suite. Worth flagging as a possible test-coverage gap to check for in this repo's fat_llama/tests, alongside the algorithmic ports above.
+
+### [03:20:47 UTC] Cycle 1, step (a) — review current state
+Input: candidate C_0 (working tree at v-2.0.0/iter-0, unchanged).
+Action: Dispatched `review-current-state` skill (Skill tool) to refresh docs/CURRENT_STATE.md against the working tree. Its own log: .claude/log/review-current-state-20260913-032047-bkraad47.log.
+Reasoning: Required at the start of every cycle before testing/dispatching a fix, per SKILL.md step (a).
+Output: docs/CURRENT_STATE.md regenerated — 7 source files reviewed, 18 factblocks written. Confirmed test_feed.py has no decimate-and-correlate source/output coherence test, matching FFTW_OPTIMIZATION_FINDINGS item 8's flagged gap.
+
+### [03:28:15 UTC] Cycle 1, step (b) — test
+Input: candidate C_0 (working tree at v-2.0.0/iter-0, unchanged).
+Action: Dispatched `test-fat-llama` skill. Its own log: .claude/log/test-fat-llama-20260913-032117-bkraad47.log (which in turn records code-tester-reviewer's and audio-quality-checker's own logs).
+Reasoning: Required to get the merged JSON test/quality evidence for computing score_1 per the cycle policy.
+Output: 18/18 code tests pass, 0 quality findings; 9/10 audio_quality entries pass (1 fail: test_feed_assertion_coherence_review — coverage-gap finding, not an assertion defect: no stereo e2e coverage, no non-mp3 source-format tests). coherence=9.5/10, spectral_deviation=9.9/10. total_1=10, passed_1=9, **score_1 = 0.9**.
+
+### [03:28:20 UTC] Cycle 1, step (c) — early-stop check
+Input: score_1=0.9; tests/quality from step (b); DIRECTIVES (verbatim, see Step 0 research entry).
+Action: Checked both early-stop conditions per .claude/skills/rules/iterate-fat-llama.md.
+Reasoning: score_1 != 1.0, so checking satisfactory-results: (1) no code bugs — holds, all 18 code-type tests pass. (2) coherence 9.5 > 8.5 — holds. (3) spectral_deviation 9.9 > 9.0 — holds. (4) DIRECTIVES satisfied — FAILS: DIRECTIVES explicitly asks to apply the fat_llama_fftw optimizations researched in Step 0 (FFTW_OPTIMIZATION_FINDINGS 1-4: peak-relative IST threshold, IST convergence early-exit, block/WOLA local IST, IST-peak-capping) toward a v2 release — none of that has been done yet, so DIRECTIVES' own scope is entirely outstanding regardless of the high scores. The one failing audio_quality entry (test coverage gaps) is also in-scope-adjacent (finding 8) but the DIRECTIVES-satisfaction failure is the deciding factor.
+Output: No early stop. Proceeding to step (d) fix.
+
+### [03:29:00 UTC] Cycle 1, step (d) — fix (dispatched, awaiting result)
+Input: test-fat-llama JSON from step (b), DIRECTIVES verbatim, condensed mission context, FFTW_OPTIMIZATION_FINDINGS.
+Action: Dispatched `generate-code` subagent (Agent tool, subagent_type: "generate-code") with a self-contained prompt covering findings 1-4 (peak-relative IST threshold + DC-bin exclusion as primary target, convergence early-exit, IST-peak-capping to evaluate empirically, block/WOLA IST as stretch/defer-if-unsure) and finding 5's explicit CUDA-only exclusions (no ThreadPoolExecutor/CPU-threading, no pydub->soundfile swap this cycle). Agent ID a2ae2b6282e346999 (internal).
+Reasoning: generate-code has no web/network tool, so the coordinator's own Step 0 research had to be handed over as concrete, actionable findings rather than just the raw DIRECTIVES text.
+Output: pending.
+
