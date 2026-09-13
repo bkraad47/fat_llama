@@ -1043,6 +1043,185 @@ class TestAudioFattener(unittest.TestCase):
         )
 
     @requires_gpu
+    def test_lower_threshold_increases_nondominant_band_ist_contribution(
+        self
+    ):
+        # Regression test for this cycle's root-cause work on the
+        # changelog's "no clearly measurable added detail below the
+        # original Nyquist" gap. Prior measurement (audio-quality-checker,
+        # real audio) found IST's own contribution 34-78 dB below the
+        # interpolation baseline in every band above 2kHz, and root-caused
+        # it to "the peak-relative threshold mechanism itself" rather than
+        # the separate peak-inflation cap. This test isolates and directly
+        # verifies BOTH halves of that finding on this module's own
+        # broadband (multi-tone, decaying-amplitude, real-PCM-scale)
+        # synthetic signal -- closer to real program material's spectral
+        # shape than the two-tone signals used elsewhere in this file:
+        #
+        # (a) _cap_ist_changes_to_baseline_peak is NOT the bottleneck for
+        # non-dominant bands: it leaves every band far from the
+        # dominant one at (essentially) 100% of its uncapped magnitude,
+        # only shrinking the truly dominant band.
+        #
+        # (b) The default threshold_value=0.6's own peak-relative
+        # FFT-domain mask (in _ist_chain, via iterative_soft_thresholding)
+        # IS the bottleneck: a materially lower threshold (0.15, unchanged
+        # algorithm -- same hard FFT/threshold/IFFT round trip, no new
+        # synthesized content) measurably increases IST's own surviving
+        # contribution in every non-dominant band tested, without
+        # depending on the cap to do it. Measured on this exact signal
+        # (see this cycle's report): a uniform ~8.4 dB increase from
+        # 2-18kHz, with the two dominant bands (100/300 Hz, already
+        # governed by the separate peak cap) changing by under 2 dB.
+        #
+        # This does not by itself close the real-audio gap (a lower
+        # threshold_value is reported as a proposed upscale() parameter,
+        # verified only against this module's own synthetic signal, not
+        # against audio-quality-checker's real-audio pipeline this run)
+        # -- but it verifies the specific, reversible, single-parameter
+        # lever most directly implicated by the diagnosis, as a
+        # narrower, lower-risk alternative to redesigning the threshold
+        # mechanism's formula itself.
+        sr = 44100
+        n = sr  # 1s, real-PCM-like amplitude scale
+        t = cp.arange(n, dtype=cp.float64) / sr
+
+        # A loud, low-frequency-dominant pair plus a decaying-amplitude
+        # ladder of higher-frequency tones -- approximates a real
+        # broadband spectrum (loud bass, progressively quieter treble)
+        # far better than a single dominant tone or a two-tone signal.
+        freqs = [100, 300, 800, 2000, 4000, 6000, 10000, 15000, 18000]
+        amps = [20000.0, 8000.0, 3000.0, 1000.0, 300.0, 100.0, 30.0, 8.0, 3.0]
+        dominant_freqs = (100, 300)
+        nondominant_freqs = (800, 2000, 4000, 6000, 10000, 15000, 18000)
+
+        channel = cp.zeros(n, dtype=cp.float64)
+        for f, a in zip(freqs, amps):
+            channel += a * cp.sin(2 * cp.pi * f * t)
+        upscale_factor = 4
+
+        expanded = new_interpolation_algorithm(channel, upscale_factor)
+        new_sr = sr * upscale_factor
+        freq_axis = cp.fft.rfftfreq(len(expanded), 1.0 / new_sr)
+
+        def band_magnitude(spectrum, center, halfwidth=5.0):
+            mask = (freq_axis >= center - halfwidth) & (
+                freq_axis <= center + halfwidth
+            )
+            return float(cp.sum(spectrum[mask]))
+
+        default_threshold = 0.6
+        lower_threshold = 0.15
+
+        ist_default = iterative_soft_thresholding(
+            expanded.copy(), max_iter=300, threshold=default_threshold
+        )
+        ist_lower = iterative_soft_thresholding(
+            expanded.copy(), max_iter=300, threshold=lower_threshold
+        )
+        capped_default = _cap_ist_changes_to_baseline_peak(
+            expanded, ist_default
+        )
+        capped_lower = _cap_ist_changes_to_baseline_peak(expanded, ist_lower)
+
+        self.assertTrue(bool(cp.all(cp.isfinite(capped_default))))
+        self.assertTrue(bool(cp.all(cp.isfinite(capped_lower))))
+
+        # (a) The cap must leave non-dominant bands essentially untouched
+        # (>= 95% survival), confirming it is not what limits their
+        # contribution -- if a future change to the cap regressed this,
+        # this assertion (not just the dB comparison below) would catch
+        # it directly.
+        default_spectrum_uncapped = cp.abs(cp.fft.rfft(ist_default))
+        default_spectrum_capped = cp.abs(cp.fft.rfft(capped_default))
+        for f in nondominant_freqs:
+            uncapped_mag = band_magnitude(default_spectrum_uncapped, f)
+            capped_mag = band_magnitude(default_spectrum_capped, f)
+            self.assertGreater(
+                uncapped_mag, 0.0,
+                f"Test setup assumption violated: ist_changes carries no "
+                f"measurable content at {f} Hz before capping."
+            )
+            survival = capped_mag / uncapped_mag
+            self.assertGreater(
+                survival, 0.95,
+                f"_cap_ist_changes_to_baseline_peak reduced the "
+                f"non-dominant {f} Hz band's contribution (survival "
+                f"{survival:.3g}) -- this band should be classified "
+                "'residual' and left untouched by the frequency-selective "
+                "cap; if this now fails, the cap (not the threshold "
+                "mechanism) has become the bottleneck for non-dominant "
+                "bands, contradicting this cycle's root-cause finding."
+            )
+
+        # (b) A materially lower threshold_value must measurably increase
+        # every non-dominant band's own surviving contribution (after
+        # capping, i.e. the actual value upscale_channels adds onto the
+        # interpolated signal) relative to the current default -- the
+        # specific, verified lever this cycle's diagnosis points to.
+        lower_spectrum_capped = cp.abs(cp.fft.rfft(capped_lower))
+        for f in nondominant_freqs:
+            default_mag = band_magnitude(default_spectrum_capped, f)
+            lower_mag = band_magnitude(lower_spectrum_capped, f)
+            self.assertGreater(
+                default_mag, 0.0,
+                f"Test setup assumption violated: capped ist_changes "
+                f"carries no measurable content at {f} Hz at the default "
+                "threshold_value."
+            )
+            ratio = lower_mag / default_mag
+            self.assertGreater(
+                ratio, 1.5,
+                f"Lowering threshold_value from {default_threshold} to "
+                f"{lower_threshold} did not measurably increase the "
+                f"non-dominant {f} Hz band's own IST contribution (ratio "
+                f"{ratio:.3g}, expected > 1.5x / +3.5dB); this contradicts "
+                "this cycle's measured ~8.4 dB uniform gain in this band "
+                "range and would undercut the case for proposing a lower "
+                "threshold_value default."
+            )
+
+        # The lower threshold must not blow past the dominant bands by an
+        # unreasonable amount either (a sanity bound, not a tight one --
+        # this cycle measured under 2 dB / ~1.26x change there).
+        for f in dominant_freqs:
+            default_mag = band_magnitude(default_spectrum_capped, f)
+            lower_mag = band_magnitude(lower_spectrum_capped, f)
+            if default_mag > 0.0:
+                self.assertLess(
+                    lower_mag / default_mag, 3.0,
+                    f"Lowering threshold_value unexpectedly inflated the "
+                    f"dominant {f} Hz band's contribution by more than 3x "
+                    "after capping; the peak-inflation cap may not be "
+                    "handling the lower threshold as gracefully as "
+                    "measured this cycle."
+                )
+
+        # The peak-inflation cap must still actually function at the
+        # lower threshold (same acceptance bound used by this module's
+        # existing cap regression tests): a large uncapped overshoot must
+        # still be reduced to a small fraction of itself, not merely left
+        # inflated because a lower threshold changed the cap's own
+        # dominant/residual split in some way that broke it.
+        baseline_peak = float(cp.max(cp.abs(expanded)))
+        uncapped_combined_peak = float(
+            cp.max(cp.abs(expanded + ist_lower))
+        )
+        capped_combined_peak = float(
+            cp.max(cp.abs(expanded + capped_lower))
+        )
+        uncapped_excess = uncapped_combined_peak - baseline_peak
+        capped_excess = capped_combined_peak - baseline_peak
+        if uncapped_excess > 0.0:
+            self.assertLess(
+                capped_excess, uncapped_excess * 0.15,
+                "_cap_ist_changes_to_baseline_peak did not meaningfully "
+                f"bound the combined peak at the lower threshold_value="
+                f"{lower_threshold} (uncapped excess {uncapped_excess:.3g} "
+                f"-> capped excess {capped_excess:.3g})."
+            )
+
+    @requires_gpu
     def test_uncapped_ist_inflates_combined_channel_peak(self):
         # Direct measurement backing this cycle's hypothesis (cycle 6):
         # before _cap_ist_changes_to_baseline_peak existed,

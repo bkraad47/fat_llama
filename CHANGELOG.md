@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-09-13
+
+Produced by an `iterate-fat-llama` run applying algorithmic optimizations from the sibling CPU/pyfftw package `fat_llama_fftw` (which is iterated by the same skill framework against the same `upscale()` algorithm) toward this v2 release. Three fix cycles were kept; a fourth confirmed real-audio scores held steady with no code regressions and traced the one remaining known limitation to a deeper DSP-mechanism question rather than a fixable defect, meeting this process's bar for a satisfactory stop.
+
+### Fixed
+
+- **`iterative_soft_thresholding`'s threshold was an absolute cutoff that barely masked anything at real audio's actual scale** — a gap this project's own code had documented as known but unfixed. `threshold_value` (default `0.6`) is now compared against each domain's own current peak magnitude (`threshold * max(abs(current))`) rather than raw sample/FFT-bin magnitudes directly, so the same 0–1 fraction behaves consistently regardless of the signal's absolute numeric scale. The FFT's DC (zero-frequency) bin is now always excluded from the retained set, preventing an asymmetric transient from injecting a spurious constant offset.
+- **IST always ran the full `max_iterations` regardless of whether the result had already converged.** Hard-threshold IST is a fixed-point projection — once a pass's result stops changing, every further pass recomputes an identical result. IST now exits early once a pass's change falls below a small relative tolerance, cutting wasted GPU compute on real audio runs without changing the numerical result.
+- **A single whole-buffer FFT threshold let the loudest moment in an entire track set the cutoff for the whole track,** so quieter passages and other frequency bands got essentially no benefit from the peak-relative fix above (discovered while verifying it: a synthetic loud-then-quiet signal showed the quiet segment's level rising ~58 dB after IST). Signals longer than ~186ms now process in 50%-overlapping, windowed blocks (windowed overlap-add / WOLA) instead of one whole-buffer pass, so each block's own threshold reflects only its local content.
+- **The peak-relative threshold fix above introduced a real regression**, caught by real-audio measurement rather than local unit tests: IST's own peak-relative boost (usually of low-frequency content) could inflate a channel's own peak, which the pipeline's later autoscale/normalize stages then divided the *entire* channel down by — attenuating even frequency bands IST never touched, by as much as 1.7–4.8 dB (coherence 9.5→8.0, spectral deviation convergence 0.984→0.770). Fixed by capping how much of IST's contribution is allowed to inflate the channel's peak beyond what interpolation alone produced.
+- **The first version of that cap (a single uniform per-channel scalar) closed the attenuation regression but suppressed IST's own contribution almost everywhere**, including legitimately-added quiet high-frequency detail (surviving at only ~6–11% of its uncapped level). The cap now splits IST's contribution in the frequency domain, shrinking only the specific band responsible for the peak inflation and leaving other bands untouched (with a bounded fallback for cases the split alone doesn't sufficiently cover) — verified to restore ~100% survival of high-frequency detail above 2kHz while keeping the attenuation regression closed (max attenuation now under 0.4 dB).
+
+### Known remaining gap
+
+- Real audio still shows no clearly measurable *added* detail below the original Nyquist frequency (a safe, transparent upscale rather than one that clearly restores missing detail) — coherence 9.0/10, spectral deviation 9.9/10. This was root-caused this run, not left unexamined: IST's own contribution to non-dominant frequency bands is intrinsically 34–78 dB below the interpolation baseline on real program material, a property of the peak-relative threshold mechanism itself rather than of the capping fix above. Closing this further would mean redesigning IST's core threshold/reconstruction behavior — a substantially larger, higher-risk undertaking than the bounded fixes above — and was left for a future run rather than attempted with the cycle budget remaining.
+- No end-to-end test exercises the stereo channel path or non-mp3 source formats; still open from before this run.
+
 ## [1.4.4] - 2026-09-13
 
 ### Fixed

@@ -598,6 +598,42 @@ def iterative_soft_thresholding(
     windowing/overlap-add would only add unnecessary edge tapering with
     no benefit.
 
+    Non-dominant-band contribution root cause (this cycle, closing the
+    changelog's "no clearly measurable added detail below the original
+    Nyquist" gap): real-audio measurement (audio-quality-checker) found
+    IST's own contribution 34-78 dB below the interpolation baseline in
+    every band above 2kHz -- too small to move a band's level regardless
+    of _cap_ist_changes_to_baseline_peak's behavior. Direct measurement
+    this cycle (see test_lower_threshold_increases_nondominant_band_ist_
+    contribution) confirms both halves of that diagnosis on this module's
+    own broadband synthetic signal: (1) the peak-inflation cap leaves
+    every non-dominant band at ~100% of its uncapped magnitude -- it is
+    not the bottleneck; (2) the default threshold_value=0.6's own
+    peak-relative FFT-domain mask above IS the bottleneck -- for a
+    real/broadband spectrum, a bin needs to be within `threshold` (60%)
+    of the block's single loudest bin (usually low-frequency) to survive
+    each pass, which almost no higher-frequency content can ever meet.
+    A materially lower threshold_value (0.15 measured; same algorithm, no
+    new synthesized content -- still the plain hard-threshold FFT/IFFT
+    round trip) retains a larger, still information-derived set of
+    "significant" bins each pass, measurably increasing every
+    non-dominant band's own surviving contribution (uniformly ~8.4 dB
+    from 2-18kHz on this cycle's synthetic signal) while changing the
+    dominant bands by under 2 dB. This is reported as a proposed
+    threshold_value default for upscale() (see this cycle's report) --
+    verified only against this module's own synthetic signal here, not
+    yet against audio-quality-checker's real-audio pipeline. A more
+    fundamental redesign (a per-band/local-frequency-relative threshold
+    instead of one global per-block peak) was prototyped but not shipped:
+    it showed much larger gains for bands with no competing louder
+    neighbor, but also a new failure mode not present in the mechanism
+    above -- near-total collapse of a band's content depending on where
+    an arbitrary band boundary happened to fall relative to the block's
+    actual spectral content -- that could not be verified safe on real,
+    continuous-spectrum program material without the audio-quality-
+    checker pipeline, so it remains a candidate for a future cycle
+    rather than a shipped change.
+
     Returns:
     cp.ndarray: The processed audio data after IST.
     """

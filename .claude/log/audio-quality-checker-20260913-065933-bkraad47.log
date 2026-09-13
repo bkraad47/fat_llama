@@ -1,0 +1,56 @@
+# audio-quality-checker run log
+# invocation-time: 20260913-065933 UTC
+# user: bkraad47
+# branch: v-2.0.0 @ a62c4fa3c8d5858056c3218f96ed85f94c811bf0 ("iterate-fat-llama: cycle 3 fix")
+# dispatch: no proposed_upscale_params -> fixed baseline config (example.py match)
+# context from caller: previous run (prior commit) found IST's contribution suppressed by a
+#   uniform-scalar peak cap -> "safe, transparent, no measurable added detail" (coherence 9.0,
+#   spectral_deviation 9.9). This cycle makes the cap frequency-selective (dominant component
+#   shrunk toward pre-IST baseline peak, residual left untouched, safety-net fallback).
+#   Asked specifically to re-measure added-detail-below-original-Nyquist / in-band magnitude
+#   response, and to confirm the cross-band attenuation regression from two cycles ago has not
+#   reopened.
+
+### [06:59:33 UTC] Step 0 — Open log / read rules
+Input: dispatch prompt; .claude/agents/rules/audio-quality.md; .claude/rules/scope-and-safety.md
+Action: read both rules files in full; created this log file; captured git branch/commit and working-tree status; read the immediately prior audio-quality-checker log for continuity.
+Reasoning: rules and scope must be loaded before any measurement work.
+Output: branch v-2.0.0, HEAD a62c4fa3c8d5858056c3218f96ed85f94c811bf0; working tree carries ` M docs/CURRENT_STATE.md`, `?? docs/images/scorereport.pdf` and .claude/log churn.
+
+### [07:01:00 UTC] Step 3/gen — Produce output_test.flac (remote-first decision + local run)
+Input: rules "What to check" step 3 remote-GPU-first procedure; dispatch prompt (no branch/commit supplied); git status.
+Action: evaluated remote preconditions -> the dispatch supplied no branch/commit SHA AND the working tree carries uncommitted changes outside my write scope (M docs/CURRENT_STATE.md, ?? docs/images/scorereport.pdf). Per rules step 1a both conditions route to the local fallback; did NOT call mcp__fllm-mcp-server__test_generate (no speculative GPU billing against an unverified commit). Confirmed local CUDA (cupy 14.2.0, 1 device) and launched scratchpad/run_baseline.py as a background job with the exact fixed baseline config (max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, all three toggles True), input_test.mp3 -> output_test.flac.
+Reasoning: rules step 1a routes "no clear branch/commit" and "uncommitted changes beyond my write scope" to local; local GPU present so step 3 (give up loudly) does not apply.
+Output: SUCCESS in 90.3 s, exit 0. Pipeline log: upscale_factor=4 from a 192.00 kbps source, IST on both channels, autoscale, normalize, adaptive filter, final Nyquist cutoff at 22050.0 Hz. output_test.flac: 176400 Hz, 2 ch, PCM_24, 15.137279 s, 1902.0 kbps stored. Reference input_test.flac: 308700 Hz, 2 ch, PCM_24, 15.137279 s. Source input_test.mp3: 44100 Hz, 2 ch, 192 kbps, 15.137 s. Exactly one pipeline run this invocation.
+
+### [07:03:00 UTC] Step 1 — read_audio/write_audio on synthesized samples
+Input: fat_llama/audio_fattener/feed.py read_audio/write_audio; pydub.generators.Sine (mono 440 Hz/1000 ms, stereo 440/660 Hz/1500 ms).
+Action: scratchpad/step1_io.py -- round-tripped mono mp3->flac, stereo mp3->flac, mono mp3->wav, plus the normalize=False/reference_amplitude path; inspected with soundfile.info, mutagen.flac.FLAC and FFT.
+Reasoning: rules "What to check" step 1 (bitrate / sample rate / channels / duration + real content).
+Output: mono read sr=44100, n=44100, ndim=1, ch=1, bitrate=63999 bps, dominant 440.0 Hz, all finite, peak 31212 (raw PCM scale), dur 1.0 s. mono write FLAC/PCM_24 24-bit, sr 44100, ch 1, duration 1.000000 s (input 1.0), 459.9 kbps stored, peak 1.0, clipped_frac 4.5e-05, dominant 440.0 Hz, corr vs normalized input 0.999999999999999. stereo read shape (66150,2), ch 2, bitrate 127997, dominant L=440.0/R=660.0. stereo write FLAC/PCM_24 ch 2, duration 1.500000 s (input 1.5), 919.7 kbps, peak 1.0, clipped_frac 7.6e-06, dominant L=440.0/R=660.0 (no channel swap/collapse). wav write WAV/DOUBLE sr 44100 ch 1 duration 1.0. normalize=False wav: peak 0.9525 (not stretched to full scale) and exactly invertible by reference_amplitude 32768. All PASS.
+
+### [07:05:00 UTC] Step 2 — Test coherence review (test_feed.py)
+Input: fat_llama/tests/test_feed.py (28 tests); git diff HEAD~1 HEAD -- fat_llama/tests/test_feed.py.
+Action: confirmed this commit's test changes are confined to the cap tests (test_cap_ist_changes_to_baseline_peak_bounds_peak_without_zeroing_detail rewritten, new test_cap_ist_changes_to_baseline_peak_safety_net_matches_uniform_cap); read those in full plus the wiring test; re-checked the rest of the suite (reviewed in full last run) for existence-only assertions.
+Reasoning: rules "What to check" step 2.
+Output: No test asserts only existence/non-emptiness. The previous run's finding (i) -- assertion (b)'s loose 1%-of-uncapped bound plus a self-derived "uncapped_scale" that proved nothing about magnitude -- is now RESOLVED: the rewritten test adds assertion (c), a genuine frequency-selective check (quiet 8 kHz band survival > 0.9 vs cycle 6's ~0.059), and the safety-net test reuses the same 15%-of-uncapped-excess acceptance bound. No assertion edits needed or made. Remaining coverage observation (not a defect): still no test measuring the full pipeline's per-band in-band magnitude response against an interpolation-only baseline on real audio -- that is only measured here, by this agent.
+
+### [07:10:00 UTC] Steps 4-5 — Coherence checks + spectral deviation score
+Input: output_test.flac (this run's local baseline output), input_test.flac (reference), input_test.mp3 (source).
+Action: scratchpad/analyze.py -- resample_poly'd output 176400 -> 308700 Hz, trimmed to min length (4672878 samples, 15.1373 s); measured clipping, dropouts, NaN/Inf, discontinuities, above-original-Nyquist energy, per-band magnitude response (17 bands + a 500 Hz HF sweep) vs BOTH the reference FLAC and the mp3 source, and per-band noise floor (5th percentile); computed the fixed spectral-deviation algorithm (STFT nperseg=2048/noverlap=1024, self-max normalization, spectral convergence + Pearson correlation).
+Reasoning: rules Scoring -> Coherence + Spectral deviation; caller specifically asked to re-measure added-detail-below-Nyquist / in-band magnitude response and to confirm the cross-band attenuation regression stays closed.
+Output: clipping frac 2.05e-05 (reference's own 1.69e-04); NaN=0 Inf=0; dropout runs >50 ms: 0 out / 0 ref / 0 unmatched; discontinuity p99.9 out 0.01539 vs ref 0.05818 (ratio 0.26, out_max 0.0409 vs ref 0.2522 -- output smoother, no clicks); above-original-Nyquist (22050 Hz) peak -175.93 dB and RMS -187.53 dB rel in-band peak, energy fraction 1.27e-14 (FFT noise floor -> constraint satisfied); band deviation vs reference: max attenuation -0.33 dB, max boost +3.00 dB, mean |dev| 0.85 dB, 0 bands attenuated >1 dB (REGRESSION FROM TWO CYCLES AGO REMAINS CLOSED: was 1.7-4.8 dB); ADDED DETAIL: output tracks the mp3 source within -0.20..-0.40 dB in every band below 19 kHz (mean -0.16 dB overall) and exceeds it only at 19.5-22.05 kHz by +0.2..+4.3 dB at ~-128 dB absolute (~106 dB below in-band peak) -> still NO measurable pipeline-added detail below the original Nyquist. spectral_convergence=0.9727, correlation=0.9998, combined=0.9862 -> spectral_deviation 9.9. Coherence 9.0 (clean everywhere, transparent upscale, no measurable added detail -> rules table 8-9 row, top of it).
+
+### [07:14:00 UTC] Step 5b — Cause diagnostic for the added-detail result (read-only, no second pipeline run)
+Input: input_test.mp3 channel 0; feed.py's new_interpolation_algorithm / iterative_soft_thresholding / _cap_ist_changes_to_baseline_peak called directly (not upscale()).
+Action: scratchpad/diag_cap.py -- reproduced one channel's pre-IST interpolation baseline and raw IST output, replicated the cycle-7 dominant/residual FFT split (dominant_band_ratio=0.002), applied the real cap, and measured per band: dominant-bin fraction, IST magnitude survival through the cap, and IST magnitude relative to the interpolation baseline.
+Reasoning: caller asked for possible causes; needed to separate "cap suppresses HF detail" (cycle 6's failure mode) from "IST contributes almost nothing in HF to begin with".
+Output: baseline_peak 32787, uncapped combined peak 58223 (1.776x baseline) -> capped 34335 (1.047x), excess reduction 93.9%; safety net does NOT engage on real audio; only 0.95% of bins classify as dominant. Per-band IST survival through the cap: 0-100 Hz 6.1%, 100-500 Hz 6.2%, 500-2000 Hz 40.6%, and 100.0% in EVERY band above 2 kHz (cycle 6's uniform scalar would have applied ~11% everywhere) -- the frequency-selective fix demonstrably works as designed on real audio. BUT IST's own contribution above 2 kHz is tiny relative to the interpolation baseline it is added to: -34.2 dB (2-4 kHz), -75.1 dB (4-8 kHz), -77.9 dB (8-12 kHz), -75.5 dB (12-16 kHz), -70.7 dB (16-19 kHz). At -75 dB relative, 100% survival changes a band's level by ~0.0015 dB -- unmeasurable. ROOT CAUSE of "no added detail" is therefore relocated: it is no longer the cap suppressing IST, it is IST's HF contribution being ~70-78 dB below the interpolated signal.
+
+### [07:16:00 UTC] Step 6 — Spectrogram comparison image
+Input: input_test.mp3, input_test.flac, output_test.flac; analysis.py's read_mp3/read_flac/normalize.
+Action: scratchpad/spectrogram.py -- three stacked scipy.signal.spectrogram(nperseg=2048) panels (mp3 -> reference -> output), shared x axis, shared vmin=-120/vmax=0 dB scale and one colorbar, spectrogram data masked (not merely axis-limited) above the mp3's own Nyquist 22050.0 Hz; wrote docs/images/spectrogram_comparison.png.
+Reasoning: rules Scoring -> Spectrogram comparison image.
+Output: docs/images/spectrogram_comparison.png written (808 KB). Visual: the output panel reproduces the reference/source time-frequency structure (including the quiet 0-7 s intro and the ~19 kHz encoder lowpass cliff), with no imaging band, ghosting or clipping smear.
+
+### [07:17:00 UTC] DONE — Baseline config, local GPU run: coherence 9.0, spectral_deviation 9.9 (convergence 0.9727 / correlation 0.9998). Cross-band attenuation regression stays CLOSED (max in-band attenuation vs reference 0.33 dB, 0 bands >1 dB); no above-Nyquist content (-175.9 dB); the frequency-selective cap works as designed (100% IST survival above 2 kHz on real audio, safety net inactive) but added detail below the original Nyquist is still unmeasurable because IST's own HF contribution sits 70-78 dB below the interpolation baseline.

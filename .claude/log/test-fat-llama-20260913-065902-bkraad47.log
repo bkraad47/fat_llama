@@ -1,0 +1,13 @@
+### [06:59:02 UTC] Step 1/2 — dispatch code-tester-reviewer and audio-quality-checker in parallel
+Input: candidate C_3 (cycle 3's frequency-selective capping fix committed/tagged). No proposed_upscale_params from generate-code cycle 3 (its report had proposed_upscale_params: null).
+Action: Dispatching both subagents in parallel, no parameter override.
+Output: code-tester-reviewer returned {"tests": 27 entries all type=code/status=pass, "quality": [], "log": ".claude/log/code-tester-reviewer-20260913-065927-bkraad47.log"}. audio-quality-checker returned {"tests": 12 entries type=audio_quality (11 pass, 1 fail: test_added_detail_below_original_nyquist -- still no measurable added detail below 19kHz), "scores": {"coherence": 9.0, "spectral_deviation": 9.9}, "upscale_params_used": baseline, "spectrogram_image": "docs/images/spectrogram_comparison.png", "log": ".claude/log/audio-quality-checker-20260913-065933-bkraad47.log"}. Cross-band regression from cycle 2 confirmed NOT reopened (max attenuation -0.33dB). Key new finding (own diagnostic, real audio): the frequency-selective cap works exactly as designed -- 100% HF-contribution survival above 2kHz (was ~11% uniformly), safety net doesn't engage, only 0.95% of bins classify as dominant -- but IST's own contribution to those bands is intrinsically -34 to -78 dB below the interpolation baseline, "too small to move a band's level whatever the cap does." Checker's own conclusion: "Any further attempt at measurable in-band added detail has to change how much IST contributes in those bands (e.g. iterative_soft_thresholding's threshold/reconstruction behaviour), not the cap."
+
+### [07:07:00 UTC] Step 4 — update README.md
+Action: Edited README.md's AUDIO_QUALITY_SCORES block (coherence/spectral_deviation rationale refreshed with cycle 4's real-audio measurement and root-cause finding).
+Output: README.md updated successfully.
+
+### [07:07:05 UTC] Step 5 — merged JSON result
+Output: {"tests": [27 code entries + 12 audio_quality entries], "quality": [], "scores": {"coherence": {"value": 9.0}, "spectral_deviation": {"value": 9.9}}, "upscale_params_used": {"source": "baseline"}, "spectrogram_image": "docs/images/spectrogram_comparison.png", "logs": [".claude/log/code-tester-reviewer-20260913-065927-bkraad47.log", ".claude/log/audio-quality-checker-20260913-065933-bkraad47.log", ".claude/log/test-fat-llama-20260913-065902-bkraad47.log"]}
+
+### [07:07:10 UTC] DONE — 39 total test entries (27 code all pass, 12 audio_quality 11 pass/1 fail), coherence 9.0/10, spectral_deviation 9.9/10, cross-band regression confirmed still closed, README updated.
