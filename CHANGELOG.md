@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.4] - 2026-09-13
+
+### Fixed
+
+- **README had several broken/misdirected links and images.** The logo image had an empty `src`, and the "Changelog" section linked to a nonexistent `docs/images/CHANGELOG.md` instead of the repo's actual `CHANGELOG.md`. The logo, spectrogram-results, and how-it-works images now reference their local repo path (`docs/images/...`) first — which GitHub resolves directly — each wrapped in a link to the full `raw.githubusercontent.com` URL as a fallback for viewers where the relative path doesn't resolve (e.g. PyPI's long-description rendering). The changelog reference now links to the local `CHANGELOG.md`, with a `raw` link alongside it as the same kind of fallback.
+- **PyPI downloads badge relied solely on shields.io, which is sometimes unreliable.** The badge now also links through to `https://pypistats.org/packages/fat-llama` so readers can reach live download stats even when the shields.io badge image itself fails to render.
+
 ## [1.4.3] - 2026-09-07
 
 Produced by an `iterate-fat-llama` run resolving [GitHub issue #18](https://github.com/bkraad47/fat_llama/issues/18) (branch `Issue-no-18-suggestions-floating-point-dequantize-fixes`). The issue raised a set of technical suggestions for improving MP3→FLAC upscaling fidelity; one fix cycle was kept, and a second confirmed the result with every audio-quality check passing, meeting this process's bar for an early, satisfactory stop.
