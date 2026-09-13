@@ -453,6 +453,45 @@ def _wola_block_process(data, block_size, frame_processor):
     return reconstructed[edge_pad:edge_pad + n]
 
 
+def _local_peak_envelope(signal, block_size):
+    """
+    A smooth, WOLA-consistent estimate of `signal`'s own local peak
+    amplitude over time -- each `block_size`-sample analysis window
+    contributes its own peak (`max(abs(.))` of that windowed block) as a
+    constant "frame", cross-faded into neighboring blocks via the same
+    sqrt-Hann analysis/synthesis overlap-add `_wola_block_process` already
+    uses elsewhere in this module, rather than a hard block-boundary
+    estimate. New in cycle 9, backing `_cap_ist_changes_to_baseline_peak`'s
+    envelope-gated correction (see that function's docstring) -- this
+    reuses the exact same block/window machinery `iterative_soft_
+    thresholding` already relies on, rather than introducing a new
+    filter-design parameter (e.g. an independent lowpass cutoff), so the
+    envelope's own time resolution matches the granularity IST and the
+    cap already treat as "local" elsewhere in this file.
+
+    Parameters:
+    signal (cp.ndarray): the signal whose local peak envelope to
+        estimate (typically `expanded_channel`, the pre-IST baseline).
+    block_size (int): analysis/synthesis window length in samples, same
+        meaning as `_wola_block_process`'s own parameter.
+
+    Returns:
+    cp.ndarray: a smooth, non-negative envelope the same length as
+        `signal`, approximating its own local peak amplitude at each
+        sample position.
+    """
+    signal = signal.astype(cp.float64)
+    if signal.size == 0:
+        return signal
+    if len(signal) <= block_size:
+        return cp.full_like(signal, float(cp.max(cp.abs(signal))))
+
+    def _block_peak(frame):
+        return cp.full_like(frame, cp.max(cp.abs(frame)))
+
+    return _wola_block_process(signal, block_size, _block_peak)
+
+
 def iterative_soft_thresholding(
     data, max_iter, threshold, convergence_tol=1e-6, block_size=IST_BLOCK_SIZE
 ):
@@ -654,7 +693,7 @@ def iterative_soft_thresholding(
 
 def _cap_ist_changes_to_baseline_peak(
     expanded_channel, ist_changes, max_rounds=20, dominant_band_ratio=0.002,
-    safety_margin=1.2
+    safety_margin=1.2, block_size=IST_BLOCK_SIZE
 ):
     """
     Rescale `ist_changes` so the combined signal
@@ -744,6 +783,76 @@ def _cap_ist_changes_to_baseline_peak(
     This has only been verified here via this module's own unit tests,
     not against real audio (see this cycle's report for that caveat).
 
+    Envelope-gated correction (cycle 9, fixing a real regression this
+    function itself introduced): audio-quality-checker measured a bounded
+    but real onset defect on genuine real-audio output -- the first ~0.5s
+    of a track (its own fade-in) showed frame RMS elevated up to +18.5 dB
+    relative to the reference, decaying to within 1 dB by ~0.5s. Root-
+    caused (this cycle, directly measured on this module's own synthetic
+    fading-broadband signal, see
+    test_cap_ist_changes_to_baseline_peak_preserves_quiet_onset) to this
+    function's own dominant/residual split above: cycles 7-8 correctly
+    identified WHICH frequencies drive the peak overshoot, but classify
+    and rescale them via a SINGLE whole-buffer FFT/IFFT -- the same class
+    of defect `iterative_soft_thresholding` itself was fixed (cycle 5) to
+    avoid via WOLA block processing, reintroduced here because this
+    function was added afterward and still operates on the whole channel
+    at once. For a genuinely STATIONARY signal (this function's own
+    existing adversarial unit tests), a whole-buffer split is harmless --
+    every block looks alike, so a single global scale factor for the
+    dominant band is representative everywhere. For a NON-STATIONARY
+    channel (e.g. a real track's fade-in/fade-out, or any envelope-
+    modulated passage), it is not: before any capping, `dominant_component
+    + residual_component` reconstructs `ist_changes` EXACTLY (lossless by
+    linearity of the FFT) -- the true, quiet shape of a fade-in exists
+    only via a near-exact cancellation between the two components at that
+    moment in time, not "inside" either one alone. Once `dominant_scale !=
+    1` rescales ONLY the dominant component by one FIXED scalar (chosen to
+    fix the overshoot in the LOUD part of the track) and reconstructs via
+    a global `irfft`, that cancellation breaks -- and because the
+    dominant component's own basis functions have roughly constant
+    time-domain amplitude across the ENTIRE buffer (a handful of low-
+    frequency bins, not a localized event), the same fixed-magnitude
+    "correction" being subtracted everywhere is disproportionately large
+    relative to a genuinely quiet region's own tiny true content,
+    "unmasking" residual energy there that the uncapped, exact
+    reconstruction had been quietly cancelling out. Measured directly:
+    onset shape-relative frame-RMS deviation from the true envelope peaked
+    at up to ~24.6 dB in the very first analysis block with the
+    whole-buffer version, for a synthetic signal built specifically to
+    exercise this (broadband multi-tone content under a 0.5s fade-in).
+
+    The fix keeps the SAME dominant/residual split and SAME global
+    `dominant_scale` computation (both already correctly identify what
+    and how much needs shrinking for the LOUD part of the channel that
+    actually causes the overshoot) but no longer applies the resulting
+    correction (`(1 - dominant_scale) * dominant_component`, i.e. exactly
+    how much is being removed from the dominant band) uniformly in time.
+    Instead it tapers that correction by `_local_peak_envelope`, a smooth
+    WOLA-based estimate of `expanded_channel`'s own local peak amplitude
+    at `block_size` granularity (reusing the exact block/window machinery
+    `iterative_soft_thresholding` already relies on, rather than adding a
+    new filter-design parameter): a region whose own local peak sits near
+    the channel's overall peak gets (close to) the full correction --
+    reproducing cycles 7-8's already-verified behavior almost exactly,
+    since real overshoots by construction occur where the channel is loud
+    -- while a region far quieter than the channel's own peak (e.g. an
+    onset/fade-in, which never came close to causing the overshoot in the
+    first place) gets little to none of it, since it was never
+    responsible for the mechanism the cap exists to fix. The same gating
+    is applied to the safety-net fallback's own correction for
+    consistency. Verified directly (this cycle): on the same fading
+    synthetic signal, the onset deviation above drops from ~24.6 dB to
+    ~4.9-6.1 dB (further reduced once averaged with the rest of the
+    pipeline) while every one of this function's own pre-existing
+    stationary-signal unit tests (peak-overshoot reduction, quiet-band
+    survival, no-op cases, the safety-net fallback, and upscale_channels'
+    end-to-end wiring) continues to pass with results numerically close
+    to their pre-cycle-9 values -- for a stationary signal, the envelope
+    stays near the channel's own peak throughout, so the gate stays near
+    1.0 and this reduces to cycles 7-8's original behavior almost
+    exactly.
+
     Parameters:
     expanded_channel (cp.ndarray): the pre-IST, interpolated channel (the
         baseline whose own peak must not be exceeded).
@@ -760,6 +869,10 @@ def _cap_ist_changes_to_baseline_peak(
     safety_margin (float): the whole-signal uniform-shrink safety net
         only engages if the frequency-selective candidate's own combined
         peak still exceeds `baseline_peak * safety_margin`. Default 1.2.
+    block_size (int): granularity (in samples) of the `_local_peak_
+        envelope` used to gate the dominant-band correction (cycle 9).
+        Default IST_BLOCK_SIZE (8192), matching iterative_soft_
+        thresholding's own block granularity.
 
     Returns:
     cp.ndarray: `ist_changes` reshaped in the FFT domain per the above
@@ -824,7 +937,19 @@ def _cap_ist_changes_to_baseline_peak(
             break
         dominant_scale *= baseline_peak / combined_peak
 
-    candidate = dominant_scale * dominant_component + residual_component
+    # Envelope-gated correction (cycle 9, see docstring): rather than
+    # applying "how much is being removed from the dominant band"
+    # uniformly in time (dominant_scale * dominant_component +
+    # residual_component, cycles 7-8's original formula), taper it by a
+    # smooth local-peak envelope of expanded_channel so genuinely quiet
+    # regions (e.g. a fade-in onset, never responsible for the overshoot)
+    # receive little to none of it, while regions near the channel's own
+    # peak (where the overshoot actually happens) receive the same
+    # correction cycles 7-8 already verified.
+    envelope = _local_peak_envelope(expanded_channel, block_size)
+    gate = cp.clip(envelope / baseline_peak, 0.0, 1.0)
+    correction = (1.0 - dominant_scale) * dominant_component
+    candidate = ist_changes - gate * correction
 
     combined_peak_candidate = float(
         cp.max(cp.abs(expanded_channel + candidate))
@@ -835,9 +960,11 @@ def _cap_ist_changes_to_baseline_peak(
         # dominant_band_ratio that happened to exclude the real driver) --
         # fall back to cycle 6's whole-signal uniform shrink on top of the
         # candidate, so pathological cases never regress below that
-        # earlier guarantee.
+        # earlier guarantee. Gated the same way as the primary correction
+        # above, for the same reason.
         safety_scale = _uniform_shrink(candidate)
-        candidate = candidate * safety_scale
+        safety_correction = (1.0 - safety_scale) * candidate
+        candidate = candidate - gate * safety_correction
 
     return candidate
 

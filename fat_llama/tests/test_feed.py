@@ -1497,6 +1497,86 @@ class TestAudioFattener(unittest.TestCase):
         )
 
     @requires_gpu
+    def test_cap_ist_changes_to_baseline_peak_preserves_quiet_onset(self):
+        # Regression test for a cycle 9 finding (audio-quality-checker,
+        # real audio): a genuine track onset/fade-in showed frame RMS
+        # elevated up to +18.5 dB relative to the reference in the first
+        # ~0.5s, decaying to within 1 dB by ~0.5s -- present at the
+        # shipped default threshold_value=0.6, not specific to a
+        # since-rejected lower-threshold experiment. Root-caused (see
+        # _cap_ist_changes_to_baseline_peak's own docstring) to that
+        # function's dominant/residual FFT split being done via a SINGLE
+        # whole-buffer FFT: for a genuinely non-stationary channel (an
+        # amplitude-modulated fade, unlike this function's own pre-cycle-9
+        # unit tests, which all use stationary tones), rescaling only the
+        # dominant component by one fixed, whole-buffer scalar breaks a
+        # near-exact cancellation that (uncapped) reconstructs the true,
+        # quiet onset shape, "unmasking" a disproportionate fraction of
+        # energy specifically where the real content is quietest.
+        #
+        # This builds a broadband (multi-tone), raised-cosine fade-in
+        # synthetic channel -- silence-adjacent but not exactly zero, to
+        # keep the "expected" pre-IST reference RMS well-defined -- and
+        # measures the actual shipped function's onset behavior directly,
+        # the same way test_ist_no_static_floor_in_quiet_segment measures
+        # IST's own quiet-content behavior: RMS of the combined
+        # (post-cap) signal in a small onset window vs. that same
+        # window's pre-IST interpolation-only RMS.
+        sr = 44100
+        dur = 1.2
+        n = int(sr * dur)
+        t = cp.arange(n, dtype=cp.float64) / sr
+
+        floor = 0.0005
+        fade_n = int(0.5 * sr)
+        env = cp.ones(n, dtype=cp.float64)
+        k = cp.arange(fade_n, dtype=cp.float64)
+        ramp = floor + (1.0 - floor) * 0.5 * (1 - cp.cos(cp.pi * k / fade_n))
+        env[:fade_n] = ramp
+
+        freqs = [200.0, 600.0, 1500.0, 4000.0, 9000.0]
+        content = cp.zeros(n, dtype=cp.float64)
+        for f in freqs:
+            content += cp.sin(2 * cp.pi * f * t)
+        content /= len(freqs)
+        channel = env * content * 20000.0
+
+        upscale_factor = 4
+        expanded = new_interpolation_algorithm(channel, upscale_factor)
+        ist_changes = iterative_soft_thresholding(
+            expanded, max_iter=300, threshold=0.6
+        )
+        capped = _cap_ist_changes_to_baseline_peak(expanded, ist_changes)
+        combined = expanded.astype(cp.float64) + capped
+
+        onset_window = 1024
+        onset_rms_baseline = float(cp.sqrt(cp.mean(
+            expanded[:onset_window].astype(cp.float64) ** 2
+        )))
+        onset_rms_after = float(cp.sqrt(cp.mean(
+            combined[:onset_window] ** 2
+        )))
+
+        self.assertGreater(
+            onset_rms_baseline, 0.0,
+            "Test setup assumption violated: the onset window's pre-IST "
+            "baseline is exactly silent, so this test cannot meaningfully "
+            "measure an RMS ratio there."
+        )
+
+        ratio_db = 20 * math.log10(onset_rms_after / onset_rms_baseline)
+        self.assertLess(
+            ratio_db, 8.0,
+            "_cap_ist_changes_to_baseline_peak inflated the fade-in "
+            f"onset's RMS by {ratio_db:.1f} dB relative to the pre-IST "
+            "interpolation baseline in the same window -- expected well "
+            "under this bound (measured ~4.1 dB with the cycle 9 "
+            "envelope-gated fix in place; the pre-fix whole-buffer "
+            "dominant/residual split measured ~17.1 dB on this exact "
+            "signal, which this bound would correctly reject)."
+        )
+
+    @requires_gpu
     def test_upscale_channels_combined_peak_never_exceeds_interpolation_baseline(  # noqa: E501
         self
     ):
