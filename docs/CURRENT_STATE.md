@@ -37,7 +37,7 @@ fat_llama/
 
 ## fat_llama/audio_fattener/feed.py
 
-Module-level constant: `MAX_REALISTIC_SAMPLE_RATE_HZ = 192000` — the realistic consumer-playback sample-rate ceiling used to bound `compute_upscale_factor`'s output; see that function's factblock.
+Module-level constants: `MAX_REALISTIC_SAMPLE_RATE_HZ = 192000` — the realistic consumer-playback sample-rate ceiling used to bound `compute_upscale_factor`'s output; see that function's factblock. `IST_BLOCK_SIZE = 8192` — default windowed-overlap-add (WOLA) block size (samples, ~186 ms at 44.1 kHz) for `iterative_soft_thresholding`'s local-block processing; see that function's factblock.
 
 ### `read_audio(file_path, audio_format) -> (int, np.ndarray, float|None, AudioSegment)`
 **File:** fat_llama/audio_fattener/feed.py:27
@@ -83,26 +83,81 @@ expanded_channel = new_interpolation_algorithm(channel, upscale_factor=7)
 ```
 
 ### `initialize_ist(data, threshold) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:261
+**File:** fat_llama/audio_fattener/feed.py:270
 **Kind:** function
-**Description:** Initializes IST by hard-thresholding `data` in the time domain: keeps samples whose absolute value exceeds `threshold` (an **absolute**, not peak-relative, cutoff as of this snapshot — see `iterative_soft_thresholding`'s "Known issue" note), zeroing the rest.
+**Description:** Initializes IST by hard-thresholding `data` in the time domain: keeps samples whose absolute value exceeds `threshold * cp.max(cp.abs(data))` (a **peak-relative** fraction, 0-1, as of cycle 5 — fixed from a prior absolute-cutoff comparison, which barely masked anything at real audio's raw-PCM scale), zeroing the rest. Handles an empty `data` array as a no-op passthrough.
 **Parameters:**
 - `data` (`cp.ndarray`): input audio data.
-- `threshold` (`float`): absolute magnitude threshold.
+- `threshold` (`float`): peak-relative threshold fraction (0-1).
 **Returns:** `cp.ndarray` — thresholded data, same shape as `data`.
 **Usage:**
 ```python
 data_thres = initialize_ist(data, threshold=0.6)
 ```
 
-### `iterative_soft_thresholding(data, max_iter, threshold) -> cp.ndarray`
-**File:** fat_llama/audio_fattener/feed.py:277
+### `_ist_chain(data, max_iter, threshold, convergence_tol) -> cp.ndarray`
+**File:** fat_llama/audio_fattener/feed.py:296
 **Kind:** function
-**Description:** Performs `max_iter` rounds of FFT → magnitude-threshold → IFFT on `data` (initialized via `initialize_ist`), each pass unconditionally running (no convergence early-exit as of this snapshot). `threshold` is compared as-is against raw time- and frequency-domain magnitudes, not scaled to the signal's own peak — documented as a known, unresolved issue (real audio's FFT-bin magnitudes are orders of magnitude above the conventional `threshold_value=0.6` default, so almost nothing is masked). A prior per-iteration synthetic harmonic-reconstruction term was tried across several cycles and ultimately removed (see in-file docstring) after being found to inject a constant, non-source tone; this function currently performs the plain FFT/threshold/IFFT round trip only.
+**Description:** The actual IST fixed-point iteration (new in cycle 5, factored out of `iterative_soft_thresholding`): initializes via `initialize_ist`, then repeats FFT → peak-relative frequency-domain threshold (with the DC bin, index 0, always excluded to prevent an asymmetric transient from making it the dominant/sole surviving bin) → IFFT, breaking early once a pass's largest per-sample change falls below `convergence_tol` times the initial post-threshold peak magnitude (hard-threshold IST is an exact fixed-point projection, so further passes past convergence recompute an identical result). Operates on whichever buffer it's given — the whole signal for short inputs, or one windowed block for long inputs (see `iterative_soft_thresholding`/`_wola_block_process`).
+**Parameters:**
+- `data` (`cp.ndarray`): buffer to run IST on (whole signal or one analysis block).
+- `max_iter` (`int`): maximum passes before giving up on convergence.
+- `threshold` (`float`): peak-relative threshold fraction (0-1).
+- `convergence_tol` (`float`): relative early-exit tolerance.
+**Returns:** `cp.ndarray` — IST-processed buffer, same length as `data`.
+**Usage:**
+```python
+result = _ist_chain(data, max_iter=300, threshold=0.6, convergence_tol=1e-6)
+```
+
+### `_periodic_hann_window(n) -> cp.ndarray`
+**File:** fat_llama/audio_fattener/feed.py:358
+**Kind:** function
+**Description:** DFT-even ("periodic") Hann window (`sin^2(pi*k/n)` form), distinct from the symmetric/endpoint-zero Hann window — satisfies the constant-overlap-add (COLA) property at 50% hop, needed for `_wola_block_process`'s reconstruction.
+**Parameters:**
+- `n` (`int`): window length in samples.
+**Returns:** `cp.ndarray` — length-`n` window, `float64`.
+**Usage:**
+```python
+window = _periodic_hann_window(8192)
+```
+
+### `_sqrt_hann_window(n) -> cp.ndarray`
+**File:** fat_llama/audio_fattener/feed.py:378
+**Kind:** function
+**Description:** Square root of `_periodic_hann_window`, used as both the analysis and synthesis window in `_wola_block_process` — applying it twice is equivalent to applying the COLA-compliant periodic Hann window once.
+**Parameters:**
+- `n` (`int`): window length in samples.
+**Returns:** `cp.ndarray` — length-`n` window, `float64`.
+**Usage:**
+```python
+window = _sqrt_hann_window(8192)
+```
+
+### `_wola_block_process(data, block_size, frame_processor) -> cp.ndarray`
+**File:** fat_llama/audio_fattener/feed.py:398
+**Kind:** function
+**Description:** Applies `frame_processor` independently to overlapping (50% hop), sqrt-Hann-windowed blocks of `data` (analysis), then reconstructs via weighted overlap-add (WOLA): the same sqrt-Hann window is applied again on the synthesis side, and the sum is divided by the real accumulated window-squared weight at each sample (not a flat scalar), including at the zero-padded edges. New in cycle 5, backing `iterative_soft_thresholding`'s block/local processing.
+**Parameters:**
+- `data` (`cp.ndarray`): full-length signal to process.
+- `block_size` (`int`): analysis/synthesis window length in samples (must be even; hop is `block_size // 2`).
+- `frame_processor` (`callable`): `cp.ndarray -> cp.ndarray` of the same length, applied to each windowed block independently.
+**Returns:** `cp.ndarray` — reconstructed signal, same length as `data`.
+**Usage:**
+```python
+result = _wola_block_process(data, 8192, lambda frame: _ist_chain(frame, 300, 0.6, 1e-6))
+```
+
+### `iterative_soft_thresholding(data, max_iter, threshold, convergence_tol=1e-6, block_size=IST_BLOCK_SIZE) -> cp.ndarray`
+**File:** fat_llama/audio_fattener/feed.py:456
+**Kind:** function
+**Description:** Public IST entry point; as of cycle 5, a dispatcher over `_ist_chain`. Signals no longer than `block_size` run `_ist_chain` directly on the whole buffer (unchanged fast path, matches every short synthetic-buffer unit test). Longer signals are processed via `_wola_block_process` — each 50%-overlap, sqrt-Hann-windowed ~186ms block runs its own independent, converging `_ist_chain` (so each block's peak-relative threshold reflects only that block's local content), then WOLA-reconstructed. The per-block approach was added this cycle after finding that a single whole-buffer-FFT threshold lets one loud passage's globally-retained content leak (via `ifft`'s whole-buffer basis) into temporally distant quiet passages once peak-relative thresholding (see `initialize_ist`) actually engages — measured as a 57.8 dB quiet-segment RMS rise before this fix, brought back within the original ~12 dB bound after it. A prior per-iteration synthetic harmonic-reconstruction term was tried across cycles 2-3 and removed in cycle 4 after being found to inject a constant, non-source tone; this function does not reintroduce it.
 **Parameters:**
 - `data` (`cp.ndarray`): input audio data (typically the interpolated, pre-IST channel).
-- `max_iter` (`int`): number of IST iterations to run unconditionally.
-- `threshold` (`float`): absolute FFT-bin magnitude threshold.
+- `max_iter` (`int`): ceiling on IST passes (per block, if blocked); actual count may be lower due to convergence early-exit.
+- `threshold` (`float`): peak-relative threshold fraction (0-1), applied each iteration as `threshold * max(abs(current))`.
+- `convergence_tol` (`float`): relative early-exit tolerance. Default `1e-6`.
+- `block_size` (`int`): WOLA block size in samples. Default `IST_BLOCK_SIZE` (8192).
 **Returns:** `cp.ndarray` — the IST-processed data (added onto the interpolated signal by `upscale_channels`, not used standalone).
 **Usage:**
 ```python
@@ -245,7 +300,7 @@ GPU_AVAILABLE = _cuda_gpu_available()
 ### `class TestAudioFattener(unittest.TestCase)`
 **File:** fat_llama/tests/test_feed.py:44
 **Kind:** class
-**Description:** The project's test suite for `fat_llama.audio_fattener.feed`. `setUp`/`tearDown` create and remove a synthetic 1-second 440 Hz sine-wave MP3 fixture. Non-GPU tests (`test_read_audio`, `test_write_audio`, `test_write_audio_normalize_false_preserves_relative_level`, `test_write_audio_wav_uses_64bit_float_and_is_lossless`, `test_compute_upscale_factor_bounds_realistic_sample_rate`, `test_lms_block_ranges_partitions_range_exactly`) run unconditionally; everything else is decorated `@requires_gpu` and exercises `lms_filter`, `iterative_soft_thresholding`, `new_interpolation_algorithm`, `apply_original_nyquist_cutoff`, and end-to-end `upscale()` behavior (Nyquist cutoff, adaptive filter wiring, `toggle_normalize`, `target_bitrate_kbps`-driven factor bounds). No test currently asserts that the *upscaled* output content resembles the *source* content beyond dominant-frequency checks (no decimate-and-correlate coherence test, unlike the fftw sibling package's test suite).
+**Description:** The project's test suite for `fat_llama.audio_fattener.feed`. `setUp`/`tearDown` create and remove a synthetic 1-second 440 Hz sine-wave MP3 fixture. Non-GPU tests (`test_read_audio`, `test_write_audio`, `test_write_audio_normalize_false_preserves_relative_level`, `test_write_audio_wav_uses_64bit_float_and_is_lossless`, `test_compute_upscale_factor_bounds_realistic_sample_rate`, `test_lms_block_ranges_partitions_range_exactly`) run unconditionally; everything else is decorated `@requires_gpu` and exercises `lms_filter`, `iterative_soft_thresholding`/`_ist_chain`/`initialize_ist`, `new_interpolation_algorithm`, `apply_original_nyquist_cutoff`, and end-to-end `upscale()` behavior (Nyquist cutoff, adaptive filter wiring, `toggle_normalize`, `target_bitrate_kbps`-driven factor bounds). Cycle 5 (fftw-optimization port) added `test_initialize_ist_threshold_is_peak_relative`, `test_iterative_soft_thresholding_excludes_dc_bin`, `test_iterative_soft_thresholding_converges_before_max_iter`, and `test_iterative_soft_thresholding_block_processing_shape_and_finite`, and adjusted `test_ist_no_static_floor_in_quiet_segment`'s measurement window to start one `IST_BLOCK_SIZE` past the loud/quiet transition (a documented, bounded one-block-width transition-edge artifact, not a reintroduction of the persistent whole-track floor the test guards against). No test currently asserts that the *upscaled* output content resembles the *source* content beyond dominant-frequency checks (no decimate-and-correlate coherence test, unlike the fftw sibling package's test suite; also flagged: no stereo-channel end-to-end coverage, no non-mp3 source-format coverage).
 **Usage:**
 ```python
 python -m unittest fat_llama.tests.test_feed

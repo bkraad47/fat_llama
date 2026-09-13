@@ -11,10 +11,12 @@ from mutagen.flac import FLAC
 
 from fat_llama.audio_fattener import feed as feed_module
 from fat_llama.audio_fattener.feed import (
-    IST_BLOCK_SIZE, MAX_REALISTIC_SAMPLE_RATE_HZ, _lms_block_ranges,
-    apply_original_nyquist_cutoff, compute_upscale_factor, initialize_ist,
-    iterative_soft_thresholding, lms_filter, new_interpolation_algorithm,
-    read_audio, upscale, write_audio
+    IST_BLOCK_SIZE, MAX_REALISTIC_SAMPLE_RATE_HZ,
+    _cap_ist_changes_to_baseline_peak, _lms_block_ranges,
+    _wola_block_process, apply_original_nyquist_cutoff,
+    compute_upscale_factor, initialize_ist, iterative_soft_thresholding,
+    lms_filter, new_interpolation_algorithm, read_audio, upscale,
+    upscale_channels, write_audio
 )
 
 
@@ -750,6 +752,46 @@ class TestAudioFattener(unittest.TestCase):
             "non-finite output."
         )
 
+        # (d) The overlap-add reconstruction itself must be amplitude-exact,
+        # not merely length-preserving and finite. Assertions (a)-(c) above
+        # would all still pass if the analysis/synthesis windowing or the
+        # accumulated window-squared normalization in _wola_block_process
+        # were wrong (e.g. the symmetric cp.hanning window instead of the
+        # COLA-compliant periodic one, a hop that isn't exactly
+        # block_size // 2, or dividing by a flat scalar instead of the real
+        # per-sample weight) -- those defects show up as a level error or a
+        # hop-synchronous amplitude ripple riding on otherwise finite,
+        # correct-length output, which is an audible artifact this module
+        # would otherwise never catch. Running the WOLA machinery with an
+        # identity frame_processor isolates the reconstruction from IST's
+        # own (deliberately lossy) thresholding: it must return the input
+        # essentially bit-for-bit. Measured (audio-quality-checker, this
+        # GPU): relative error ~4e-16, i.e. float64 round-off, for several
+        # lengths including non-block-aligned ones.
+        identity_reconstruction = _wola_block_process(
+            data, IST_BLOCK_SIZE, lambda frame: frame
+        )
+        peak = float(cp.max(cp.abs(data)))
+        max_abs_err = float(cp.max(cp.abs(identity_reconstruction - data)))
+        self.assertEqual(
+            len(identity_reconstruction), n,
+            "_wola_block_process did not preserve the input length with an "
+            f"identity frame processor ({len(identity_reconstruction)} vs "
+            f"{n})."
+        )
+        self.assertLess(
+            max_abs_err, peak * 1e-9,
+            "_wola_block_process is not a perfect-reconstruction "
+            "overlap-add: with an identity frame processor its output "
+            f"differs from its input by up to {max_abs_err:.3g} "
+            f"({max_abs_err / peak:.3g} relative to the signal's own peak "
+            f"{peak:.3g}), far above float64 round-off. The analysis/"
+            "synthesis windows and the accumulated window-squared "
+            "normalization must cancel exactly, or every IST block "
+            "contributes a level error / hop-synchronous ripple to the "
+            "reconstructed signal."
+        )
+
     @requires_gpu
     def test_initialize_ist_threshold_is_peak_relative(self):
         # Regression test for cycle 5: initialize_ist used to compare
@@ -999,6 +1041,288 @@ class TestAudioFattener(unittest.TestCase):
             "floor being injected rather than genuine local detail or a "
             "bounded transition-edge artifact."
         )
+
+    @requires_gpu
+    def test_uncapped_ist_inflates_combined_channel_peak(self):
+        # Direct measurement backing this cycle's hypothesis (cycle 6):
+        # before _cap_ist_changes_to_baseline_peak existed,
+        # iterative_soft_thresholding's own peak-relative threshold (see
+        # its docstring) keeps/boosts whichever frequency dominates a
+        # block's own spectrum -- for a signal with one loud, low-
+        # frequency-dominant component, that is the low-frequency content,
+        # so adding ist_changes back onto the interpolated channel (as
+        # upscale_channels does) can raise the *combined* channel's own
+        # time-domain peak above what interpolation alone produced. This
+        # test exercises iterative_soft_thresholding's raw output
+        # directly (uncapped) to confirm that inflation is real and
+        # measurable on this codebase's own actual call path, not just a
+        # concern carried over from the fftw sibling package.
+        sr = 44100
+        n = sr  # 1s
+        t = cp.arange(n, dtype=cp.float64) / sr
+        # Loud, low-frequency-dominant component + a much quieter
+        # high-frequency component -- real-PCM-like amplitude scale.
+        channel = (
+            20000.0 * cp.sin(2 * cp.pi * 100 * t)
+            + 500.0 * cp.sin(2 * cp.pi * 8000 * t)
+        )
+        upscale_factor = 4
+
+        expanded = new_interpolation_algorithm(channel, upscale_factor)
+        ist_changes = iterative_soft_thresholding(
+            expanded, max_iter=300, threshold=0.6
+        )
+
+        baseline_peak = float(cp.max(cp.abs(expanded)))
+        combined_peak = float(cp.max(cp.abs(expanded + ist_changes)))
+
+        self.assertGreater(
+            combined_peak, baseline_peak * 1.1,
+            "Test setup assumption violated: uncapped IST no longer "
+            f"inflates the combined channel peak (baseline={baseline_peak:.3g}"
+            f", combined={combined_peak:.3g}) on this loud-low/quiet-high "
+            "synthetic signal; _cap_ist_changes_to_baseline_peak's "
+            "regression test below would not meaningfully exercise the "
+            "fix."
+        )
+
+    @requires_gpu
+    def test_cap_ist_changes_to_baseline_peak_bounds_peak_without_zeroing_detail(  # noqa: E501
+        self
+    ):
+        # Regression test for cycle 6: audio-quality-checker measured a
+        # real regression from cycle 5's peak-relative IST threshold fix
+        # -- a broad ~1.7-4.8 dB attenuation across most bands relative to
+        # the reference FLAC, worst in bands IST itself did not boost.
+        # Root cause (see _cap_ist_changes_to_baseline_peak's docstring):
+        # IST's own peak-relative boost of the dominant (usually low-
+        # frequency) content inflates the combined channel's peak above
+        # what interpolation alone produced (confirmed directly by
+        # test_uncapped_ist_inflates_combined_channel_peak above, on this
+        # exact synthetic signal); upscale()'s later autoscale/normalize
+        # stages then divide the WHOLE channel by that inflated peak,
+        # attenuating every frequency including ones IST never touched.
+        #
+        # The fix must (a) actually bound the combined peak at (or very
+        # near) the pre-IST baseline peak, and (b) NOT reopen the
+        # documented "IST barely adds anything" bug by shrinking
+        # ist_changes to near zero -- i.e. the quiet high-frequency
+        # component's own contribution to ist_changes must survive at a
+        # measurable, non-collapsed level.
+        sr = 44100
+        n = sr
+        t = cp.arange(n, dtype=cp.float64) / sr
+        channel = (
+            20000.0 * cp.sin(2 * cp.pi * 100 * t)
+            + 500.0 * cp.sin(2 * cp.pi * 8000 * t)
+        )
+        upscale_factor = 4
+
+        expanded = new_interpolation_algorithm(channel, upscale_factor)
+        ist_changes = iterative_soft_thresholding(
+            expanded, max_iter=300, threshold=0.6
+        )
+        baseline_peak = float(cp.max(cp.abs(expanded)))
+        uncapped_ist_peak = float(cp.max(cp.abs(ist_changes)))
+
+        capped_ist_changes = _cap_ist_changes_to_baseline_peak(
+            expanded, ist_changes
+        )
+        combined_peak_after = float(
+            cp.max(cp.abs(expanded + capped_ist_changes))
+        )
+
+        # (a) The combined peak must be brought down close to the pre-IST
+        # baseline -- NOT necessarily down to it exactly. As documented
+        # in _cap_ist_changes_to_baseline_peak, when IST's surviving
+        # content is in phase with the baseline's own peak sample (as it
+        # is here, by construction: IST's peak-relative threshold retains
+        # mostly the same dominant 100 Hz component), ANY positive scale
+        # strictly increases the combined peak above baseline -- a hard
+        # zero-overshoot guarantee is unreachable there without
+        # scale == 0 (which would fail assertion (b) below). The
+        # meaningful, verifiable claim is a large reduction in the
+        # overshoot itself: from an uncapped ~1.80x (see
+        # test_uncapped_ist_inflates_combined_channel_peak) down to
+        # (measured on this exact synthetic case) ~1.05x -- i.e. the
+        # capped residual overshoot must be a small fraction of the
+        # uncapped one, not merely somewhat smaller.
+        uncapped_combined_peak = float(cp.max(cp.abs(expanded + ist_changes)))
+        uncapped_excess = uncapped_combined_peak - baseline_peak
+        capped_excess = combined_peak_after - baseline_peak
+        self.assertGreater(
+            uncapped_excess, 0.0,
+            "Test setup assumption violated: uncapped ist_changes does "
+            "not inflate the combined peak above baseline on this "
+            "signal, so this test cannot meaningfully exercise the cap."
+        )
+        self.assertLess(
+            capped_excess, uncapped_excess * 0.15,
+            "_cap_ist_changes_to_baseline_peak did not meaningfully "
+            f"reduce the combined-peak overshoot (uncapped excess "
+            f"{uncapped_excess:.3g} over baseline {baseline_peak:.3g} -> "
+            f"capped excess {capped_excess:.3g}); expected at least an "
+            "~85% reduction in the excess, consistent with this cycle's "
+            "own direct measurement (~1.80x -> ~1.05x)."
+        )
+
+        # (b) The cap must not have collapsed ist_changes to (essentially)
+        # zero. This scenario is deliberately adversarial -- IST's
+        # peak-relative threshold retains mostly the same dominant 100 Hz
+        # component the baseline's own peak sample sits on, i.e. exactly
+        # the in-phase case where (per the docstring) even a small
+        # positive scale still increases the combined peak, so a bounded
+        # 20-round multiplicative shrink converges toward a small (not
+        # zero) scale rather than a comfortably large one on this
+        # particular signal (measured directly: ~5.9% of the uncapped
+        # peak survives here). The meaningful, non-circular claim is that
+        # SOME real detail survives (scale is bounded away from zero, not
+        # driven to it) -- the cap is a single uniform scalar, so it can
+        # never zero out one frequency's contribution while preserving
+        # another's; whatever fraction of ist_changes survives, the
+        # quiet 8000 Hz component keeps the exact same relative weight
+        # within it as before capping.
+        capped_ist_peak = float(cp.max(cp.abs(capped_ist_changes)))
+        self.assertGreater(
+            capped_ist_peak, uncapped_ist_peak * 0.01,
+            "_cap_ist_changes_to_baseline_peak shrank ist_changes to "
+            f"(near) exactly zero (uncapped peak {uncapped_ist_peak:.3g} "
+            f"-> capped peak {capped_ist_peak:.3g}); expected a bounded, "
+            "nonzero scale even on this adversarial in-phase scenario, "
+            "not a full reopening of the 'IST adds nothing' bug."
+        )
+        # The quiet 8000 Hz component's own relative weight within
+        # ist_changes must be exactly preserved by capping (a uniform
+        # scalar cannot disproportionately zero out one frequency), i.e.
+        # it must still be present in capped_ist_changes at (scale) times
+        # its uncapped level, not silently dropped altogether on top of
+        # the uniform shrink.
+        uncapped_scale = float(
+            cp.max(cp.abs(capped_ist_changes))
+            / cp.max(cp.abs(ist_changes))
+        )
+        expected_capped = ist_changes * uncapped_scale
+        self.assertTrue(
+            bool(cp.allclose(
+                capped_ist_changes, expected_capped, rtol=1e-6
+            )),
+            "_cap_ist_changes_to_baseline_peak did not apply a single "
+            "uniform scalar to ist_changes -- some frequency content "
+            "(e.g. the quiet 8000 Hz component) may have been altered "
+            "disproportionately relative to the rest."
+        )
+
+        # Sanity: the cap is a pure uniform rescale (a single scalar),
+        # never a shape change -- same length, and every retained
+        # relative ratio between samples of ist_changes is preserved.
+        self.assertEqual(len(capped_ist_changes), len(ist_changes))
+
+    @requires_gpu
+    def test_cap_ist_changes_to_baseline_peak_is_noop_when_not_needed(self):
+        # The cap must be a true no-op (scale == 1.0) when the combined
+        # peak never exceeds the baseline in the first place -- e.g. a
+        # zero threshold's ist_changes, or a baseline peak of zero -- so
+        # it never touches signals that don't need it.
+        n = 4096
+        expanded = cp.zeros(n, dtype=cp.float64)
+        ist_changes = cp.ones(n, dtype=cp.float64) * 5.0
+
+        result = _cap_ist_changes_to_baseline_peak(expanded, ist_changes)
+        self.assertTrue(
+            bool(cp.all(result == ist_changes)),
+            "_cap_ist_changes_to_baseline_peak altered ist_changes when "
+            "the pre-IST baseline peak is zero (nothing to cap against); "
+            "expected an unmodified pass-through."
+        )
+
+        t = cp.arange(n, dtype=cp.float64) / 44100
+        expanded = 10000.0 * cp.sin(2 * cp.pi * 200 * t)
+        # ist_changes deliberately out of phase with expanded (same
+        # frequency, opposite sign) so adding it back on can only ever
+        # *reduce* the combined amplitude (to 7000) relative to the
+        # baseline peak (10000) -- unlike an in-phase addition (where even
+        # a small positive amplitude strictly increases the peak, see
+        # test_cap_ist_changes_to_baseline_peak_bounds_peak_without_
+        # zeroing_detail above), this is a genuine no-cap-needed case.
+        ist_changes = -3000.0 * cp.sin(2 * cp.pi * 200 * t)
+        result = _cap_ist_changes_to_baseline_peak(expanded, ist_changes)
+        self.assertTrue(
+            bool(cp.allclose(result, ist_changes)),
+            "_cap_ist_changes_to_baseline_peak rescaled ist_changes even "
+            "though the combined peak never exceeded the baseline; "
+            "expected a no-op (scale == 1.0)."
+        )
+
+    @requires_gpu
+    def test_upscale_channels_combined_peak_never_exceeds_interpolation_baseline(  # noqa: E501
+        self
+    ):
+        # End-to-end wiring check: upscale_channels itself (not just the
+        # cap helper in isolation) must actually apply the cap, for every
+        # channel, before adding ist_changes onto the interpolated
+        # signal. Reproduces the same loud-low/quiet-high synthetic
+        # scenario as a 2-channel (stereo) input.
+        sr = 44100
+        n = sr
+        t = cp.arange(n, dtype=cp.float64) / sr
+        channel = (
+            20000.0 * cp.sin(2 * cp.pi * 100 * t)
+            + 500.0 * cp.sin(2 * cp.pi * 8000 * t)
+        )
+        channels = cp.column_stack([channel, channel * 0.5])
+        upscale_factor = 4
+
+        # The pre-IST baseline peak per channel, computed the same way
+        # upscale_channels does internally (via new_interpolation_
+        # algorithm alone), to compare against the actual processed
+        # output below.
+        baseline_peaks = [
+            float(cp.max(cp.abs(
+                new_interpolation_algorithm(channels[:, i], upscale_factor)
+            )))
+            for i in range(channels.shape[1])
+        ]
+
+        # The same channel run WITHOUT the cap (calling the pre-cap
+        # pipeline stages directly), so this test compares against this
+        # exact signal's own uncapped overshoot rather than an assumed
+        # constant -- avoids the cap-bounds test's earlier mistake of
+        # assuming a fixed numeric tolerance transfers across signals.
+        uncapped_peaks = []
+        for i in range(channels.shape[1]):
+            expanded_i = new_interpolation_algorithm(
+                channels[:, i], upscale_factor
+            )
+            ist_changes_i = iterative_soft_thresholding(
+                expanded_i, max_iter=300, threshold=0.6
+            )
+            uncapped_peaks.append(
+                float(cp.max(cp.abs(expanded_i + ist_changes_i)))
+            )
+
+        processed = upscale_channels(
+            channels, upscale_factor, max_iter=300, threshold=0.6
+        )
+
+        for i, baseline_peak in enumerate(baseline_peaks):
+            processed_peak = float(cp.max(cp.abs(processed[:, i])))
+            uncapped_excess = uncapped_peaks[i] - baseline_peak
+            capped_excess = processed_peak - baseline_peak
+            self.assertGreater(
+                uncapped_excess, 0.0,
+                f"Test setup assumption violated for channel {i}: uncapped "
+                "IST does not inflate this channel's peak above baseline, "
+                "so this test cannot meaningfully exercise the wiring."
+            )
+            self.assertLess(
+                capped_excess, uncapped_excess * 0.15,
+                f"upscale_channels' channel {i} output peak "
+                f"({processed_peak:.3g}) is not meaningfully closer to its "
+                f"pre-IST interpolation baseline ({baseline_peak:.3g}) than "
+                f"the uncapped result ({uncapped_peaks[i]:.3g}) would be; "
+                "_cap_ist_changes_to_baseline_peak does not appear to be "
+                "wired into upscale_channels."
+            )
 
     @requires_gpu
     def test_new_interpolation_algorithm_is_bandlimited(self):

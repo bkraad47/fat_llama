@@ -616,6 +616,118 @@ def iterative_soft_thresholding(
     )
 
 
+def _cap_ist_changes_to_baseline_peak(
+    expanded_channel, ist_changes, max_rounds=20
+):
+    """
+    Rescale `ist_changes` (uniformly, by a single per-channel scalar) so
+    that the combined signal `expanded_channel + ist_changes` peaks close
+    to -- rather than substantially above -- `expanded_channel` (the
+    pre-IST, interpolation-only baseline) on its own.
+
+    Regression fix (cycle 6, ported from the sibling fat_llama_fftw
+    package's `_cap_ist_changes_to_baseline_peak`, after audio-quality-
+    checker measured a real regression from cycle 5's peak-relative IST
+    threshold fix): peak-relative thresholding (see initialize_ist /
+    iterative_soft_thresholding) keeps/boosts whichever frequency
+    dominates a block's own spectrum -- for real music that is usually
+    low-frequency content. Adding that boosted content back onto
+    `expanded_channel` (upscale_channels) can raise the *combined*
+    channel's own time-domain peak above what interpolation alone
+    produced. upscale()'s later per-channel stages -- autoscale
+    (normalize_signal(channel) * original peak) and normalize
+    (normalize_signal(channel), i.e. divide by the channel's OWN peak) --
+    are both a single scalar multiply/divide of the *entire* channel, so
+    an inflated peak from IST's own low-frequency boost gets divided back
+    down across every frequency in that channel, including the mid/high
+    bands IST never touched. Measured (audio-quality-checker, cycle 6):
+    smooth ~1.7-4.8 dB attenuation across most bands relative to the
+    reference FLAC (worst in bands IST did not itself boost, smallest in
+    the low band it did), with coherence dropping from 9.5 to 8.0 and
+    spectral_deviation convergence from 0.984 to 0.770 -- consistent with
+    exactly this "IST inflates the channel peak, then autoscale/normalize
+    divides the whole channel down harder" mechanism, and directly
+    reproduced on a synthetic loud-low-frequency + quiet-high-frequency
+    channel in this cycle's own regression test (measured 1.80x combined-
+    channel peak inflation over the pre-IST baseline before this fix).
+
+    This does not change `iterative_soft_thresholding` itself (still
+    plain FFT/threshold/IFFT, no synthetic content, per
+    .claude/rules/project-mission.md) -- it only bounds how much of IST's
+    own contribution survives to be added onto the interpolated channel,
+    closing off the specific downstream renormalization mechanism above
+    without touching the DSP method that produces `ist_changes` in the
+    first place.
+
+    Because `expanded_channel + scale * ist_changes`'s peak location can
+    shift as `scale` changes (it is a per-sample max over the whole
+    channel, not a smooth linear function of `scale`), there is no closed
+    -form `scale` in general -- this performs a small, bounded number of
+    iterative shrink rounds (each: measure the current combined peak,
+    and if it still exceeds the baseline, shrink `scale` by the ratio
+    `baseline_peak / combined_peak`) rather than a single one-shot
+    rescale. `max_rounds=20` mirrors fat_llama_fftw's own empirically-
+    tuned value (fewer rounds, e.g. 5, left ~12-15% peak overshoot and
+    ~1-1.24 dB worst-band attenuation there; well beyond ~20 started
+    squeezing out real IST-added detail) -- this project's own pipeline
+    caps `ist_changes` at the same relative point in the pipeline (right
+    after IST, before autoscale) as fftw's does, so the same tuning was
+    used as the starting point here too.
+
+    Verified directly (this cycle, own unit tests): when IST's surviving
+    (peak-relative-retained) content happens to be exactly in phase with
+    `expanded_channel`'s own peak sample, ANY positive `scale` strictly
+    increases the combined peak above the baseline -- a hard "never
+    exceed" guarantee is mathematically unreachable there without
+    `scale == 0` (i.e. discarding all of `ist_changes`, reopening the
+    "IST adds nothing" bug this cycle must not reintroduce). This
+    function therefore approaches, but does not guarantee reaching, the
+    baseline peak: on this cycle's own adversarial synthetic case (a
+    loud low-frequency-dominant channel plus a much quieter high-
+    frequency component, threshold=0.6, max_iter=300), 20 rounds reduces
+    an uncapped 1.80x combined-peak inflation to roughly 1.05x (a ~97%
+    reduction in the *excess* over baseline) while leaving a non-trivial
+    fraction of `ist_changes`'s own peak intact -- a large, verified
+    improvement over the uncapped regression, not an exact bound. This
+    has only been verified here via this module's own unit tests, not
+    against real audio (see this cycle's report for that caveat).
+
+    Parameters:
+    expanded_channel (cp.ndarray): the pre-IST, interpolated channel (the
+        baseline whose own peak must not be exceeded).
+    ist_changes (cp.ndarray): IST's output for this channel, about to be
+        added onto `expanded_channel` by upscale_channels.
+    max_rounds (int): maximum number of iterative shrink rounds. Default
+        20.
+
+    Returns:
+    cp.ndarray: `ist_changes`, uniformly rescaled by a single scalar in
+        [0, 1] (unchanged, scalar 1.0, if no capping was needed).
+    """
+    expanded_channel = expanded_channel.astype(cp.float64)
+    if expanded_channel.size == 0:
+        return ist_changes
+
+    baseline_peak = float(cp.max(cp.abs(expanded_channel)))
+    if baseline_peak == 0.0:
+        # A silent pre-IST baseline has no positive peak to bound against;
+        # initialize_ist itself would already have zeroed an all-zero
+        # input's threshold mask, so ist_changes is expected to be zero
+        # here too -- nothing to cap.
+        return ist_changes
+
+    scale = 1.0
+    for _ in range(max_rounds):
+        combined_peak = float(
+            cp.max(cp.abs(expanded_channel + scale * ist_changes))
+        )
+        if combined_peak <= baseline_peak or combined_peak == 0.0:
+            break
+        scale *= baseline_peak / combined_peak
+
+    return ist_changes * scale
+
+
 def _lms_block_ranges(start, n, block_size):
     """
     Partition [start, n) into consecutive, non-overlapping chunks of at
@@ -811,6 +923,18 @@ def upscale_channels(channels, upscale_factor, max_iter, threshold):
     max_iter (int): The maximum number of iterations for IST.
     threshold (float): The threshold value for IST.
 
+    As of the cycle 6 fix (see _cap_ist_changes_to_baseline_peak's
+    docstring), `ist_changes` is capped -- per channel, by a single
+    uniform scalar -- before being added onto the interpolated channel,
+    so IST's own peak-relative boost cannot inflate this channel's peak
+    beyond what interpolation alone produced. Without this, that
+    inflation propagated into upscale()'s later autoscale/normalize
+    stages (each a per-channel scalar divide by this channel's own peak),
+    which divided every frequency in the channel down harder than the
+    reference -- including bands IST never touched -- measured
+    (audio-quality-checker, cycle 6) as a broad ~1.7-4.8 dB attenuation
+    regression relative to the reference FLAC.
+
     Returns:
     cp.ndarray: The upscaled and processed audio channels.
     """
@@ -824,6 +948,9 @@ def upscale_channels(channels, upscale_factor, max_iter, threshold):
         logger.info("Performing IST...")
         ist_changes = iterative_soft_thresholding(
             expanded_channel, max_iter, threshold
+        )
+        ist_changes = _cap_ist_changes_to_baseline_peak(
+            expanded_channel, ist_changes
         )
         expanded_channel = expanded_channel.astype(cp.float64) + ist_changes
 

@@ -52,5 +52,32 @@ Output: No early stop. Proceeding to step (d) fix.
 Input: test-fat-llama JSON from step (b), DIRECTIVES verbatim, condensed mission context, FFTW_OPTIMIZATION_FINDINGS.
 Action: Dispatched `generate-code` subagent (Agent tool, subagent_type: "generate-code") with a self-contained prompt covering findings 1-4 (peak-relative IST threshold + DC-bin exclusion as primary target, convergence early-exit, IST-peak-capping to evaluate empirically, block/WOLA IST as stretch/defer-if-unsure) and finding 5's explicit CUDA-only exclusions (no ThreadPoolExecutor/CPU-threading, no pydub->soundfile swap this cycle). Agent ID a2ae2b6282e346999 (internal).
 Reasoning: generate-code has no web/network tool, so the coordinator's own Step 0 research had to be handed over as concrete, actionable findings rather than just the raw DIRECTIVES text.
+Output: generate-code report — outcome "refuted-then-confirmed". Implemented peak-relative IST threshold (initialize_ist + new _ist_chain helper) with FFT DC-bin (index 0) always excluded, and a convergence early-exit (default tol 1e-6 of initial scale). Initial hypothesis (finding 1 alone) was refuted by a regression in test_ist_no_static_floor_in_quiet_segment (quiet-segment RMS rose 57.8 dB -- whole-buffer-FFT leakage from loud to quiet passages once thresholding actually engages). Root-caused and fixed by adding a conservative first-pass WOLA (windowed overlap-add) block implementation of finding 4 (IST_BLOCK_SIZE=8192, 50% overlap, sqrt-Hann, weight-normalized reconstruction) -- signals <= block_size still use the direct/fast path unchanged. Finding 3 (peak-capping) evaluated and NOT added -- not needed to pass any available test once WOLA was in place, but flagged as inconclusive for real multi-minute program material pending the next audio-quality-checker run. Finding 5's exclusions (no CPU-threading, no pydub->soundfile swap) respected. Also updated fat_llama/tests/test_feed.py (+4 new tests, 1 existing test's measurement window adjusted with documented reasoning for a bounded one-block-width transition-edge artifact). Full verification: 22/22 local unittest pass; a real end-to-end upscale() run against input_test.mp3 completed in 1.8s (vs previously-documented multi-minute runtimes) with above-Nyquist content at -171.4 dB (hard constraint holding). Flagged out-of-scope-for-generate-code: README.md's Algorithm Explanation/threshold_value docs now describe stale (pre-this-cycle) semantics -- noted for a later doc pass. generate-code's own log: .claude/log/generate-code-20260913-033012-bkraad47.log.
+
+### [03:45:00 UTC] Cycle 1, step (e) — checkpoint
+Input: generate-code's changes (fat_llama/audio_fattener/feed.py, fat_llama/tests/test_feed.py) plus this run's own log files and the test-fat-llama-triggered README.md/docs/CURRENT_STATE.md/spectrogram/output_test.flac updates.
+Action: `git add -A && git commit -m "iterate-fat-llama: cycle 1 fix"` (commit d1f040e), then `git tag v-2.0.0/iter-1`.
+Reasoning: Per SKILL.md step (e) -- checkpoint candidate C_1.
+Output: Committed (12 files changed, 958 insertions/420 deletions), tagged v-2.0.0/iter-1.
+
+### [03:46:40 UTC] Cycle 2, step (a) — review current state
+Input: candidate C_1 (working tree at v-2.0.0/iter-1).
+Action: Dispatched `review-current-state` skill. Its own log: .claude/log/review-current-state-20260913-034541-bkraad47.log.
+Output: docs/CURRENT_STATE.md refreshed — feed.py's IST-related factblocks updated to match cycle 1's changes (peak-relative threshold, DC-bin exclusion, convergence early-exit, WOLA block processing).
+
+### [03:47:00 UTC] Cycle 2, step (b) — test (dispatched, awaiting result)
+Input: candidate C_1.
+Action: Dispatching `test-fat-llama` skill to get merged JSON for C_1.
+Output: 22/22 code tests pass, 0 quality findings; 16/18 audio_quality entries pass (2 fail: test_added_detail_below_original_nyquist -- transparent, not detail-adding; test_in_band_magnitude_response_matches_reference -- smooth ~3-5dB mid-band deficit). coherence=8.0/10 (down from 9.5), spectral_deviation=8.8/10 (down from 9.9). total_2=18, passed_2=16, **score_2 = 0.8889**. Full detail: .claude/log/test-fat-llama-20260913-034706-bkraad47.log.
+
+### [03:59:15 UTC] Cycle 2, step (c) — early-stop check
+Input: score_2=0.8889 (down from score_1=0.9 -- a real-audio-measured regression, not just a lower score).
+Action: Checked both early-stop conditions.
+Reasoning: score_2 != 1.0. Satisfactory-results: (1) no code bugs -- holds. (2) coherence 8.0 > 8.5 -- FAILS. (3) spectral_deviation 8.8 > 9.0 -- FAILS. (4) DIRECTIVES satisfied -- FAILS (no measurable added detail yet, plus a new mid-band attenuation defect). Both individual and combined conditions clearly fail.
+Output: No early stop. Proceeding to step (d) fix -- this cycle's fix should address the net-attenuation regression, most likely via FFTW_OPTIMIZATION_FINDINGS item 3 (cap IST's contribution to the pre-IST baseline peak) which generate-code's cycle-1 report explicitly flagged as the next lever to try if this exact symptom appeared.
+
+### [04:00:00 UTC] Cycle 2, step (d) — fix (dispatched, awaiting result)
+Input: cycle 2's test-fat-llama JSON (score_2=0.8889, coherence 8.0, spectral_deviation 8.8, both down from cycle 1), DIRECTIVES verbatim, condensed mission context, diagnosis (IST peak inflation -> harder final-normalize division of untouched bands) plus fftw's _cap_ist_changes_to_baseline_peak mechanism as the candidate fix.
+Action: Dispatched `generate-code` subagent to verify the diagnosis against this codebase's actual pipeline order and implement/verify an equivalent capping mechanism if confirmed. Agent ID a9a76a1fc08f18035 (internal).
 Output: pending.
 
