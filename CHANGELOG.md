@@ -2,9 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.0.0] - 2026-09-13
+## [2.0.0] - 2026-09-15
 
-Produced by an `iterate-fat-llama` run applying algorithmic optimizations from the sibling CPU/pyfftw package `fat_llama_fftw` (which is iterated by the same skill framework against the same `upscale()` algorithm) toward this v2 release. Three fix cycles were kept; a fourth confirmed real-audio scores held steady with no code regressions and traced the one remaining known limitation to a deeper DSP-mechanism question rather than a fixable defect, meeting this process's bar for a satisfactory stop.
+Produced by two `iterate-fat-llama` runs applying algorithmic optimizations from the sibling CPU/pyfftw package `fat_llama_fftw` (which is iterated by the same skill framework against the same `upscale()` algorithm) toward this v2 release, then closing the one gap the first run left open. Five fix cycles were kept in total.
 
 ### Fixed
 
@@ -13,11 +13,17 @@ Produced by an `iterate-fat-llama` run applying algorithmic optimizations from t
 - **A single whole-buffer FFT threshold let the loudest moment in an entire track set the cutoff for the whole track,** so quieter passages and other frequency bands got essentially no benefit from the peak-relative fix above (discovered while verifying it: a synthetic loud-then-quiet signal showed the quiet segment's level rising ~58 dB after IST). Signals longer than ~186ms now process in 50%-overlapping, windowed blocks (windowed overlap-add / WOLA) instead of one whole-buffer pass, so each block's own threshold reflects only its local content.
 - **The peak-relative threshold fix above introduced a real regression**, caught by real-audio measurement rather than local unit tests: IST's own peak-relative boost (usually of low-frequency content) could inflate a channel's own peak, which the pipeline's later autoscale/normalize stages then divided the *entire* channel down by — attenuating even frequency bands IST never touched, by as much as 1.7–4.8 dB (coherence 9.5→8.0, spectral deviation convergence 0.984→0.770). Fixed by capping how much of IST's contribution is allowed to inflate the channel's peak beyond what interpolation alone produced.
 - **The first version of that cap (a single uniform per-channel scalar) closed the attenuation regression but suppressed IST's own contribution almost everywhere**, including legitimately-added quiet high-frequency detail (surviving at only ~6–11% of its uncapped level). The cap now splits IST's contribution in the frequency domain, shrinking only the specific band responsible for the peak inflation and leaving other bands untouched (with a bounded fallback for cases the split alone doesn't sufficiently cover) — verified to restore ~100% survival of high-frequency detail above 2kHz while keeping the attenuation regression closed (max attenuation now under 0.4 dB).
+- **The cap above introduced its own real regression on non-stationary audio**: applying its frequency-domain correction via a single whole-buffer FFT is harmless for a steady signal, but for a track with a genuine fade-in it broke a near-exact cancellation that had been reconstructing the true quiet onset — unmasking disproportionate energy there. Measured on real audio as a bounded but real +18.5 dB elevation in the first ~0.5 seconds of output, collapsing whole-file dynamic range from 58.8 dB to 47.2 dB. Fixed by gating the correction with a smooth estimate of the channel's own local loudness over time, so quiet regions (which were never responsible for the peak overshoot the cap exists to fix) keep little to none of it. Verified: onset deviation drops to under 4 dB — indistinguishable from the rest of the file's own natural variation — while every previously-fixed behavior above is unaffected.
+- **Real audio now shows genuinely measurable added detail below the original Nyquist frequency** for the first time this project has been able to verify it: +0.86 to +3.05 dB of energy across 12–22 kHz beyond what plain interpolation alone produces, without reopening either regression above.
 
-### Known remaining gap
+### Investigated, no change made
 
-- Real audio still shows no clearly measurable *added* detail below the original Nyquist frequency (a safe, transparent upscale rather than one that clearly restores missing detail) — coherence 9.0/10, spectral deviation 9.9/10. This was root-caused this run, not left unexamined: IST's own contribution to non-dominant frequency bands is intrinsically 34–78 dB below the interpolation baseline on real program material, a property of the peak-relative threshold mechanism itself rather than of the capping fix above. Closing this further would mean redesigning IST's core threshold/reconstruction behavior — a substantially larger, higher-risk undertaking than the bounded fixes above — and was left for a future run rather than attempted with the cycle budget remaining.
-- No end-to-end test exercises the stereo channel path or non-mp3 source formats; still open from before this run.
+- A lower `threshold_value` (0.15 vs the documented default 0.6) was investigated as a way to increase IST's contribution to quiet/high-frequency bands, based on a promising synthetic test. Real-audio measurement refuted it: the gain was confined to already-dominant low frequencies, while the target bands were unchanged to slightly worse. The underlying limitation isn't the threshold's numeric value — in a real ~186ms analysis block, high-frequency content routinely sits 60–80 dB below the block's dominant (bass) content, so any single scalar cutoff discards it regardless of where it's set. `threshold_value`'s default remains `0.6`. A frequency-*dependent* retention criterion (rather than a single scalar) is the identified direction for closing this further, left for a future run.
+
+### Known remaining gaps
+
+- No end-to-end test exercises the stereo channel path or non-mp3 source formats.
+- A newly-found, extremely minor residue of the onset fix above: during a source's own digitally-silent lead-in (if any), the output can carry inaudible content roughly 92 dB below full scale. Bounded, ends the moment real content starts, and far below any audible threshold.
 
 ## [1.4.4] - 2026-09-13
 
