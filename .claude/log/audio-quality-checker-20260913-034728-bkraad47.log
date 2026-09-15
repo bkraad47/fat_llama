@@ -1,0 +1,77 @@
+# audio-quality-checker run 20260913-034728 (user bkraad47)
+# branch v-2.0.0, HEAD d1f040ebab3d9acddbbe2643d85a04229adad7b7
+
+### [03:47:28 UTC] Step 0 — Setup
+Input: Dispatch prompt: no proposed_upscale_params; use fixed baseline. Focus on newly-changed IST (peak-relative thresholding, DC-bin exclusion, convergence early-exit, WOLA block processing).
+Action: Read .claude/agents/rules/audio-quality.md, .claude/rules/scope-and-safety.md, fat_llama/tests/test_feed.py (full). Captured UTC time, git user, branch, HEAD SHA, working tree status.
+Reasoning: Rules file defines output contract, scoring algorithms, and the remote-GPU-first procedure; must be read in full before acting.
+Output: Log opened. Branch v-2.0.0 @ d1f040ebab3d9acddbbe2643d85a04229adad7b7; working tree dirty only under .claude/log/ and docs/CURRENT_STATE.md.
+
+### [03:52:10 UTC] Step 1 — read_audio/write_audio on a synthesized sample
+Input: pydub Sine(440) 1s mono mp3 (and a stereo variant), generated into the scratchpad.
+Action: Ran scratchpad/step1_io.py: read_audio(mp3) then write_audio(flac) and write_audio(wav, normalize=False); inspected with soundfile + mutagen.flac.
+Reasoning: Rules "What to check" step 1 -- verify bitrate/sample rate/channels/duration and that content survives the round trip.
+Output: read: sr=44100, 44100 samples, ndim=1, channels=1, bitrate=63999 bps, dur=1000 ms, peak=31212, dominant=440.0 Hz, all finite.
+  write flac: FLAC/PCM_24, 24 bits, sr=44100, ch=1, dur=1.000 s (delta 0.000), real bitrate 459.9 kbps, peak=1.0, clipped frac=4.5e-5, corr with normalized input=0.999999999999999, dominant=440.0 Hz.
+  write wav: WAV/DOUBLE, peak=0.9525, lossless round-trip max abs err=0.0.
+  stereo: read (44100,2) ch=2 -> FLAC ch=2, sr=44100, dur 1.000 s == input. PASS on all four sub-checks.
+
+### [03:53:00 UTC] Step 2 — test coherence review of fat_llama/tests/test_feed.py
+Input: fat_llama/tests/test_feed.py (1524 lines, 18 tests).
+Action: Read the whole file; checked every test for content-level (not existence-level) assertions, with focus on the new cycle-5 IST code (_ist_chain, initialize_ist peak-relative, DC exclusion, convergence early-exit, _wola_block_process).
+Reasoning: Rules "What to check" step 2 -- flag tests that only assert a file exists / is non-empty.
+Output: No existence-only tests found; every test asserts real signal properties (dominant frequency, waveform correlation, clipping fraction, RMS, finiteness, duration, subtype/bit depth, above-Nyquist band level). Gap identified: the WOLA path is covered only for output length + finiteness (test_iterative_soft_thresholding_block_processing_shape_and_finite); nothing asserts _wola_block_process's reconstruction is amplitude-correct (identity frame_processor -> exact reconstruction), so a broken analysis/synthesis window or weight normalization would produce level/ripple errors while still passing. Candidate assertion strengthening (deferred to after measurement).
+
+### [04:05:00 UTC] Step 3 — Produce output_test.flac (remote-GPU-first procedure)
+Input: Rules "What to check" step 3; no proposed_upscale_params in the dispatch prompt -> fixed baseline config.
+Action: Evaluated the remote path first. Dispatch prompt named no branch/commit to test, and `git status` shows uncommitted changes outside my permitted write scope (docs/CURRENT_STATE.md modified, plus .claude/log files); per rule 1a that means falling back to local rather than committing/pushing anything myself. Confirmed local CUDA GPU present (cp.cuda.runtime.getDeviceCount()=1, NVIDIA GeForce RTX 4050 Laptop GPU) and ran the local fallback: scratchpad/run_baseline.py as a background command (exact baseline kwargs: max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, toggle_normalize/autoscale/adaptive_filter=True, input_test.mp3 -> output_test.flac). One first attempt aborted at import (ModuleNotFoundError, repo root not on sys.path) before any pipeline work ran; fixed sys.path and relaunched -- exactly one real upscale() run this invocation.
+Reasoning: Remote path requires a coordinator-supplied branch/commit and a clean tree; neither held, so the rules route to the local GPU fallback. No parameters varied.
+Output: SUCCESS. Pipeline log: source 192.00 kbps mp3, upscale factor 4, stereo, IST -> autoscale -> normalize -> LMS -> Nyquist cutoff at 22050 Hz. ELAPSED_SECONDS 69.42 (not the ~20 min the rules file estimates -- issue #20's block-adaptive LMS plus cycle 5's IST convergence early-exit and the bounded 4x factor make the baseline run ~1 minute now). output_test.flac written: 3,289,684 bytes.
+
+### [04:08:00 UTC] Step 4 — Test suite + output audio properties
+Input: fat_llama/tests/test_feed.py; output_test.flac, input_test.flac, input_test.mp3.
+Action: `python -m unittest fat_llama.tests.test_feed -v` (pytest not installed in this venv). Ran scratchpad/analyze_output.py for container/signal properties.
+Reasoning: Rules step 1/4 -- confirm the shipped suite passes and the produced audio's bitrate/sample rate/channels/duration are sane.
+Output: 22 tests, OK, 27.8 s, 0 failures/errors/skips.
+  output_test.flac: 176400 Hz (44100 x4), 2 ch, FLAC/PCM_24 (24 bits), 2,670,216 frames, duration 15.13728 s, real bitrate 1738.6 kbps, peak 0.99999988, RMS 0.1567, 0 non-finite.
+  input_test.mp3 source: 44100 Hz, 192 kbps, 15.13728 s, 2 ch -> duration preserved exactly (delta 0.000 s); channels preserved; sample rate upscaled 4x as compute_upscale_factor intends (<= MAX_REALISTIC_SAMPLE_RATE_HZ).
+  Note for the caller: the repo-root reference input_test.flac is itself 308700 Hz (44100 x7) 24-bit stereo -- a legacy 7x-era pipeline output, not a pristine master; all reference comparisons below are against that file per the rules.
+
+### [04:12:00 UTC] Step 5 — Spectral analysis / artifact checks
+Input: output_test.flac vs input_test.flac (mono downmix, resample_poly to the common 308700 Hz, trimmed to 4,672,878 samples = 15.137 s).
+Action: Ran scratchpad/analyze_output.py and scratchpad/analyze_blocks.py (clipping, dropouts, invalid samples, discontinuities, per-band STFT energy + noise floor, 50 ms frame dynamics, WOLA block-boundary and intra-block-phase statistics, average magnitude transfer function, best-fit residual).
+Reasoning: Rules "Coherence score" checks plus the dispatch prompt's specific focus (added/missing detail, quiet-passage dynamic range, block-boundary artifacts from the new WOLA IST).
+Output:
+  Clipping: out 1.24e-5 of samples > 0.999 (reference itself 1.69e-4) -- clean.
+  Dropouts: 0 near-zero runs > 50 ms in output (0 in reference) -- none.
+  Invalid samples: 0 NaN/Inf.
+  Discontinuities: |diff| p99.9 out 0.00919 vs ref 0.05818 (ratio 0.158), max 0.0242 vs 0.2522 -- output smoother than the reference, no click/pop signature.
+  Above original Nyquist (22050 Hz, measured at the native 176400 Hz): peak -146.79 dB rel in-band peak, energy fraction 1.2e-14 -- at the FFT noise floor, constraint satisfied.
+  Added detail: NO band gains energy. Per-band STFT RMS delta (out - ref): 20-200 Hz -1.69, 200-1k -2.55, 1k-4k -4.67, 4k-8k -4.63, 8k-12k -4.23, 12k-16k -3.63, 16k-19k -2.62, 19k-22.05k -1.69 dB. The band the reference has essentially nothing in (19-22.05 kHz, ref -123 to -129 dB) stays empty in the output.
+  Noise floor (10th-percentile STFT magnitude per band): -1.5 to -4.8 dB, i.e. FELL in every band -- no broadband noise-floor rise (the cycle 2/3/4 failure mode is gone).
+  Dynamic range: 50 ms frame RMS, p95-p05 spread 26.69 dB (out) vs 27.00 dB (ref); max-min 69.18 vs 65.98 dB; quietest frame -72.82 vs -69.38 dBFS; quietest decile of reference frames moved -2.52 dB (loud decile -1.56 dB). No quiet-passage floor/collapse.
+  WOLA block boundaries (block 8192 / hop 4096 at 176400 Hz): mean |diff| exactly on the 652 hop boundaries 0.0010744 vs 0.0010820 elsewhere = -0.06 dB, p99.9 on-edge 0.0129 vs 0.0160 elsewhere -- no boundary discontinuity. Envelope-modulation prominence at the 43.07 Hz hop rate: out 5.62 dB vs ref 7.12 dB (at the 21.53 Hz block rate: 5.01 vs 4.06 dB) -- within the program's own envelope statistics. Residual hop-synchronous ripple: averaging |x| over all 652 hop-phases gives a 1.75 dB peak-to-peak (std 0.49 dB) profile, edges ~+0.53 dB and centres ~-0.52 dB relative to the mean, vs a 1.01 dB / 0.20 dB control profile on the reference -- small, bounded, no discontinuity.
+  Magnitude transfer function (out/ref, STFT RMS per bin): -1.69 dB at 150 Hz, -3.26 at 452 Hz, -4.28 at 754 Hz, -4.68 at 1.66 kHz, -4.80 at 3.17 kHz, -4.60 at 6.33 kHz, -4.15 at 9.95 kHz, -3.44 at 14.0 kHz, -2.69 at 17.0 kHz; 5-95 pct in-band spread 3.30 dB -> a smooth ~3 dB mid-band dip relative to the low end, no narrow peaks/notches or spurious tones.
+  Residual after best-fit gain 0.7934: -14.66 dB rel output RMS; residual rises with frequency (-17.9 dB at LF to -7.2 dB at 21 kHz rel reference).
+  Waveform correlation (aligned, normalized): 0.9828.
+  Likely cause of the tilt (hypothesis for generate-code, not fixed here): upscale_channels adds IST's output back onto the interpolated signal, and cycle 5's peak-relative threshold (0.6 x the block's own FFT peak) keeps almost exclusively the dominant, mostly low-frequency bins per 186 ms block; that partial LF doubling followed by the peak-normalize stage attenuates everything else by ~3-5 dB. No above-Nyquist, tonal, or block-edge defect involved.
+
+### [04:16:00 UTC] Step 2b — Test assertion strengthening (in scope)
+Input: The step 2 gap: the WOLA path had only length + finiteness coverage.
+Action: Verified _wola_block_process's perfect-reconstruction property directly first (identity frame_processor, lengths 8193 / 16384 / 41097: max relative error 2e-16 to 4e-16), then added assertion (d) to the existing test_iterative_soft_thresholding_block_processing_shape_and_finite -- identity-processor reconstruction must match the input to within peak * 1e-9 -- and added _wola_block_process to the module's import list. No production source touched.
+Reasoning: Rules "Fixing philosophy" allows strengthening test assertions; a window/COLA/weight-normalization regression would otherwise pass every existing assertion while introducing a level error or hop-synchronous ripple.
+Output: PASS -- targeted test runs green (0.45 s); full suite re-verified green earlier in step 4 (22 tests OK).
+
+### [04:18:00 UTC] Step 6 — Coherence score
+Input: All step 5 measurements against the input_test.flac reference.
+Action: Applied the rules file's Coherence score mapping.
+Reasoning: Above-Nyquist band is at the noise floor (-146.8 dB), so the >5 precondition is met. Clipping/dropouts/invalid/discontinuity checks are all clean (output is cleaner than the reference on clipping and discontinuities). No measurable added detail in any band below the original Nyquist -> 8-9 band ("safe, transparent upscale"). Docked to the bottom of that band for the smooth ~3 dB mid-band magnitude deficit (5-95 pct in-band spread 3.30 dB), which is a real, if subtle, timbre deviation rather than a coherence break.
+Output: coherence = 8.0 / 10.
+
+### [04:20:00 UTC] Step 7 — Spectral deviation score + spectrogram image
+Input: input_test.flac (reference, 308700 Hz) vs output_test.flac (176400 Hz).
+Action: Ran the fixed algorithm verbatim (mono downmix, float64, resample_poly the lower-rate signal up to 308700 Hz, trim to min length 4,672,878, scipy.signal.stft nperseg=2048 noverlap=1024, per-spectrogram max normalization, Frobenius spectral convergence + Pearson correlation, average x10). Then ran scratchpad/make_spectrogram.py: analysis.py's own read_mp3/read_flac/normalize, scipy.signal.spectrogram(nperseg=2048), three stacked shared-x panels (mp3 -> reference -> output) titled with sample rates, shared vmin=-120/vmax=0 colour scale and one colorbar, spectrogram data masked (not just axis-limited) above the mp3's own 22050 Hz Nyquist.
+Reasoning: Rules "Spectral deviation score" and "Spectrogram comparison image" sections.
+Output: spectral_convergence = 0.7697, correlation = 0.9869, combined = 0.8783 -> spectral_deviation = 8.8 / 10. Image saved to docs/images/spectrogram_comparison.png (626,314 bytes); visually the output panel tracks the reference closely across the whole 15.1 s, with no ghosting/imaging above the capped band and no visible block-rate striping.
+
+### [04:21:00 UTC] DONE — Baseline (local GPU) run clean: coherence 8.0, spectral deviation 8.8; no above-Nyquist content, no dropouts/clipping/NaN/block-boundary artifacts, dynamic range preserved; two findings reported (no measurable added detail; smooth ~3 dB mid-band magnitude deficit). One test assertion strengthened (WOLA perfect reconstruction); 22/22 tests pass.

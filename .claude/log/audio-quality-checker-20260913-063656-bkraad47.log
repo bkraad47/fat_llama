@@ -1,0 +1,48 @@
+# audio-quality-checker run log
+# invocation-time: 20260913-063656 UTC
+# user: bkraad47
+# branch: v-2.0.0 @ 13e831bc5229dc090a09544ff7eb4541db33b43a
+# dispatch: no proposed_upscale_params -> fixed baseline config (example.py match)
+# context from caller: clean retry of the 20260913-041409 dispatch (which died on a
+#   session-level rate limit, not a code issue). Re-measure added-detail-below-original-
+#   Nyquist and in-band magnitude response vs. the reference, to test whether
+#   _cap_ist_changes_to_baseline_peak closes the regression (coherence 9.5->8.0,
+#   spectral_deviation 9.9->8.8) measured two runs ago.
+
+### [06:36:56 UTC] Step 0 — Open log / read rules
+Input: dispatch prompt; .claude/agents/rules/audio-quality.md; .claude/rules/scope-and-safety.md
+Action: read both rules files in full; created this log file; captured git branch/commit and working-tree status; read the prior aborted run's log for continuity.
+Reasoning: rules and scope must be loaded before any measurement work.
+Output: branch v-2.0.0, HEAD 13e831bc5229dc090a09544ff7eb4541db33b43a; working tree carries ` M docs/CURRENT_STATE.md`, ` M output_test.flac` (prior aborted run's artifact) and .claude/log churn.
+
+### [06:39:00 UTC] Step 3/gen — Produce output_test.flac (remote-first decision + local run)
+Input: rules "What to check" step 3 remote-GPU-first procedure; dispatch prompt (no branch/commit supplied); git status.
+Action: evaluated remote preconditions -> dispatch supplied no branch/commit SHA AND the working tree carries uncommitted changes outside my write scope (` M docs/CURRENT_STATE.md`, ` M output_test.flac`). Per rules step 1a both conditions route to the local fallback; did NOT call mcp__fllm-mcp-server__test_generate (no speculative GPU billing against an unverified commit). Confirmed local CUDA (cupy 14.2.0, 1 device) and launched scratchpad/run_baseline.py as a background job with the exact fixed baseline config (max_iterations=300, threshold_value=0.6, target_bitrate_kbps=1400, all three toggles True), input_test.mp3 -> output_test.flac.
+Reasoning: rules step 1a explicitly routes "no clear branch/commit" and "uncommitted changes beyond my write scope" to local; local GPU present so step 3 (give up loudly) does not apply.
+Output: SUCCESS in 80.4 s. Log shows upscale_factor=4 from a 192.00 kbps source, IST both channels, autoscale, normalize, adaptive filter, final Nyquist cutoff at 22050.0 Hz. output_test.flac: 176400 Hz, 2 ch, PCM_24, 15.1373 s, 1883.6 kbps stored. Reference input_test.flac: 308700 Hz, 2 ch, PCM_24, 15.1373 s. Source input_test.mp3: 44100 Hz, 2 ch, 192 kbps, 15.1373 s. Exactly one pipeline run this invocation.
+
+### [06:41:00 UTC] Step 1 — read_audio/write_audio on synthesized samples
+Input: fat_llama/audio_fattener/feed.py read_audio/write_audio; pydub.generators.Sine (mono 440 Hz/1000 ms, stereo 440/660 Hz/1500 ms).
+Action: scratchpad/step1_io.py -- round-tripped mono mp3->flac, stereo mp3->flac, mono mp3->wav, plus the normalize=False/reference_amplitude path; inspected with soundfile.info, mutagen.flac.FLAC and FFT.
+Reasoning: rules "What to check" step 1 (bitrate / sample rate / channels / duration + real content).
+Output: mono read sr=44100, n=44100, ndim=1, ch=1, bitrate=63999 bps, dominant 440.0 Hz, all finite, peak 31212 (raw PCM scale). mono write FLAC/PCM_24 24-bit, sr 44100, ch 1, duration 1.000000 s (input 1.0), stored 459.2 kbps, peak 1.0, clipped_frac 4.5e-05 (samples at exactly full scale after peak-normalize), dominant 440.0 Hz, corr vs normalized input 0.999999999999999. stereo read shape (66150,2), ch 2, bitrate 127997, dominant L=440.0/R=660.0. stereo write FLAC/PCM_24 ch 2, duration 1.500000 s (input 1.5), 919.3 kbps, peak 1.0, clipped_frac 7.6e-06, dominant L=440.0/R=660.0 (no channel swap/collapse). wav write WAV/DOUBLE sr 44100 ch 1 duration 1.0. normalize=False wav: peak 0.9525 (not stretched to full scale) and exactly invertible by reference_amplitude. All PASS.
+
+### [06:43:00 UTC] Step 2 — Test coherence review (test_feed.py)
+Input: fat_llama/tests/test_feed.py (1847 lines, 21 tests).
+Action: enumerated every test and assertion; read the cap/wiring/e2e tests in full; checked each test for content-level assertions vs. mere file-existence/non-emptiness.
+Reasoning: rules "What to check" step 2.
+Output: No test asserts only existence/non-emptiness -- every e2e test checks sample rate, duration, finiteness, non-silence, clipping fraction and dominant frequency; unit tests check band-limiting, DC-bin exclusion, Nyquist cutoff, LMS block partitioning and the new cap. No assertion edits needed or made. Two coverage observations recorded for the report (not defects): (i) test_cap_ist_changes_to_baseline_peak_bounds_peak_without_zeroing_detail assertion (b)'s lower bound is very loose (capped peak > 1% of uncapped) and its uniform-scalar check derives the scale from the result itself (variable misleadingly named uncapped_scale) -- it still validly proves uniformity, but proves nothing about magnitude; (ii) no test measures the actual cycle-6 regression symptom (per-band in-band magnitude response of the full pipeline vs. an interpolation-only baseline) -- only combined-channel peaks.
+
+### [06:48:00 UTC] Steps 4-6 — Coherence checks + spectral deviation score
+Input: output_test.flac (this run's local baseline output), input_test.flac (reference), input_test.mp3 (source).
+Action: scratchpad/analyze.py -- resample_poly'd output 176400 -> 308700 Hz, trimmed to min length (4672878 samples, 15.1373 s); measured clipping, dropouts, NaN/Inf, discontinuities, above-original-Nyquist energy, per-band in-band magnitude response (14 bands, peak-normalized), noise-floor p5 per band; computed the fixed spectral-deviation algorithm (STFT nperseg=2048/noverlap=1024, self-max normalization, spectral convergence + Pearson correlation).
+Reasoning: rules Scoring -> Coherence score + Spectral deviation score; caller specifically asked to re-measure added-detail-below-Nyquist and in-band magnitude response vs. the reference.
+Output: clipping frac 9.4e-06 (reference's own is 2.3e-04); NaN=0 Inf=0; dropout runs >50 ms: 0 in output, 0 in reference, 0 unmatched; discontinuity p99.9 out 0.01539 vs ref 0.05818 (ratio 0.26 -- output is smoother, no clicks); above-Nyquist peak -146.43 dB rel in-band peak, RMS -145.49 dB, energy fraction 8.5e-15 (FFT noise floor -> constraint satisfied); band deviation vs reference max attenuation -0.37 dB, max boost +2.92 dB, mean |dev| 0.78 dB, 0 bands attenuated >1 dB (REGRESSION CLOSED: was 1.7-4.8 dB); noise floor p5 mean +0.53 dB, and negative (lower than reference) in every band below 14 kHz; added detail: output tracks the mp3 source within -0.17..-0.40 dB in every band below ~19 kHz and exceeds it only at 19.5-22.05 kHz by +0.2..+4.3 dB at ~-126 dB (~110 dB below in-band peak) -> no meaningful pipeline-added detail. spectral_convergence=0.9733, correlation=0.9998, combined=0.9865 -> spectral_deviation score 9.9. Coherence score 9.0 (clean on every check, transparent upscale, no measurable added detail below original Nyquist -> rules table's 8-9 row, top of it).
+
+### [06:52:00 UTC] Step 7 — Spectrogram comparison image
+Input: input_test.mp3, input_test.flac, output_test.flac; analysis.py's read_mp3/read_flac/normalize.
+Action: scratchpad/spectrogram.py -- three stacked scipy.signal.spectrogram(nperseg=2048) panels (mp3 -> reference -> output), shared x axis, shared vmin=-120/vmax=0 dB colour scale and one colorbar, data masked (not merely axis-limited) above the mp3's own Nyquist 22050.0 Hz; wrote docs/images/spectrogram_comparison.png. Also ran a 500 Hz-resolution HF sweep 14-22.05 kHz.
+Reasoning: rules Scoring -> Spectrogram comparison image; HF sweep to characterise the added-detail result precisely.
+Output: docs/images/spectrogram_comparison.png written (617 KB). Visual: output panel reproduces the reference/source time-frequency structure, preserves the mp3's own ~19 kHz encoder lowpass cliff, and shows no imaging/ghosting band. HF sweep confirms output - mp3 = -0.38..-0.40 dB flat up to 19 kHz, then +0.19..+4.34 dB in 19.5-22.05 kHz at -125..-127 dB absolute.
+
+### [06:54:00 UTC] DONE — Baseline config, local GPU run: coherence 9.0, spectral_deviation 9.9 (convergence 0.9733 / correlation 0.9998); the cycle-6 regression is closed (max in-band attenuation vs reference 0.37 dB, was 1.7-4.8 dB); no above-Nyquist content (-146 dB); one non-blocking finding: the pipeline adds no measurable detail over the mp3 source below the original Nyquist.

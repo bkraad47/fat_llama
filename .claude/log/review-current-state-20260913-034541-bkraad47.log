@@ -1,0 +1,12 @@
+### [03:45:41 UTC] Step 1-3 — enumerate/re-read changed files
+Input: candidate C_1 (post cycle-1 fix, tag v-2.0.0/iter-1).
+Action: Re-read fat_llama/audio_fattener/feed.py and fat_llama/tests/test_feed.py in full (the two files generate-code changed this cycle; flagged "factblock_stale" in its own report).
+Reasoning: docs/CURRENT_STATE.md must reflect the working tree as it stands for this cycle's review, per SKILL.md step (a).
+Output: feed.py gained IST_BLOCK_SIZE constant, _ist_chain, _periodic_hann_window, _sqrt_hann_window, _wola_block_process; initialize_ist and iterative_soft_thresholding rewritten (peak-relative threshold, DC-bin exclusion, convergence early-exit, WOLA block dispatch). test_feed.py gained 4 new tests and one adjusted test.
+
+### [03:46:30 UTC] Step 4-6 — update factblocks, write docs/CURRENT_STATE.md
+Action: Edited docs/CURRENT_STATE.md in place: replaced stale initialize_ist/iterative_soft_thresholding factblocks, added factblocks for the 4 new functions, updated the module-constants note and the TestAudioFattener class-level test summary. Left all other factblocks (unchanged functions/files) as-is.
+Reasoning: Targeted edit rather than full rewrite since only feed.py/test_feed.py changed this cycle.
+Output: docs/CURRENT_STATE.md updated — 17 feed.py factblocks (13 -> 17, net +4 new functions, 2 rewritten), test_feed.py class summary refreshed.
+
+### [03:46:35 UTC] DONE — docs/CURRENT_STATE.md refreshed against candidate C_1 (cycle 1 fix applied).

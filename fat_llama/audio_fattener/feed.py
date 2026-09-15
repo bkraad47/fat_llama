@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 # IST/LMS runtime) for zero real benefit. See compute_upscale_factor.
 MAX_REALISTIC_SAMPLE_RATE_HZ = 192000
 
+# Default block size (in samples) for iterative_soft_thresholding's
+# windowed-overlap-add (WOLA) local processing -- see that function's
+# docstring for why a single whole-buffer FFT threshold is unsafe once
+# peak-relative thresholding actually engages. 8192 samples is ~186 ms at
+# 44.1 kHz: long enough for reasonable frequency resolution, short enough
+# that a single loud passage's own peak-relative threshold stays local to
+# that passage instead of setting the cutoff for the entire track.
+IST_BLOCK_SIZE = 8192
+
 
 def read_audio(file_path, audio_format):
     """
@@ -262,43 +271,292 @@ def initialize_ist(data, threshold):
     """
     Initialize IST variables.
 
+    As of the cycle 5 fix (see iterative_soft_thresholding's docstring),
+    `threshold` is a peak-relative fraction (0-1), not an absolute
+    magnitude cutoff: the mask keeps samples whose absolute value exceeds
+    `threshold * max(abs(data))`, so the same conventional default
+    (0.6) behaves consistently regardless of whether `data` happens to be
+    normalized ([-1, 1]) or raw-PCM-scale (peak ~1e4-3e4).
+
     Parameters:
     data (cp.ndarray): The input audio data.
-    threshold (float): The threshold value for IST.
+    threshold (float): Peak-relative threshold fraction (0-1) for IST.
 
     Returns:
     cp.ndarray: The thresholded audio data.
     """
-    mask = cp.abs(data) > threshold
+    if data.size == 0:
+        return data
+    peak = cp.max(cp.abs(data))
+    mask = cp.abs(data) > threshold * peak
     data_thres = cp.where(mask, data, 0)
     return data_thres
 
 
-def iterative_soft_thresholding(data, max_iter, threshold):
+def _ist_chain(data, max_iter, threshold, convergence_tol):
+    """
+    The actual IST fixed-point iteration: init-threshold, then repeated
+    FFT / peak-relative-threshold (DC bin always excluded) / IFFT,
+    stopping early once the result converges. Operates on whatever
+    buffer it is given -- the whole signal for short inputs, or a single
+    windowed block for long inputs (see iterative_soft_thresholding,
+    which is the public entry point and decides which).
+
+    Parameters:
+    data (cp.ndarray): The buffer to run IST on (whole signal or one
+        analysis block).
+    max_iter (int): Maximum number of passes before giving up on
+        convergence.
+    threshold (float): Peak-relative threshold fraction (0-1).
+    convergence_tol (float): Relative early-exit tolerance.
+
+    Returns:
+    cp.ndarray: The IST-processed buffer, same length as `data`.
+    """
+    data_thres = initialize_ist(data, threshold)
+    if data_thres.size == 0:
+        return data_thres
+
+    initial_scale = float(cp.max(cp.abs(data_thres)))
+    if initial_scale == 0.0:
+        # An all-zero initial threshold (e.g. threshold >= 1, or
+        # genuinely silent input) still needs a nonzero convergence
+        # scale to compare against -- fall back to the pre-threshold
+        # data's own peak, and finally to 1.0 if that is also zero
+        # (true silence), so the tolerance check below never divides by
+        # zero or trivially never fires.
+        initial_scale = float(cp.max(cp.abs(data))) if data.size else 0.0
+    if initial_scale == 0.0:
+        initial_scale = 1.0
+
+    for _ in range(max_iter):
+        data_fft = cp.fft.fft(data_thres)
+        fft_peak = cp.max(cp.abs(data_fft))
+        mask = cp.abs(data_fft) > threshold * fft_peak
+        # Always exclude the DC (zero-frequency) bin from the retained
+        # set -- see iterative_soft_thresholding's docstring. Guards
+        # against a single asymmetric transient making bin 0 the loudest
+        # bin and therefore the dominant (or sole) survivor of a
+        # peak-relative mask.
+        mask[0] = False
+        data_fft_thres = cp.where(mask, data_fft, 0)
+        next_data_thres = cp.fft.ifft(data_fft_thres).real
+
+        change = float(cp.max(cp.abs(next_data_thres - data_thres)))
+        data_thres = next_data_thres
+        if change < convergence_tol * initial_scale:
+            # Fixed point reached: hard-threshold IST alternates an exact
+            # FFT/IFFT pair with a projection onto a fixed support, so
+            # once that support (and therefore the reconstructed signal)
+            # stops changing between passes, every further iteration up
+            # to max_iter would recompute the identical result.
+            break
+
+    return data_thres
+
+
+def _periodic_hann_window(n):
+    """
+    The DFT-even ("periodic") Hann window, sin^2(pi*k/n) -- distinct from
+    the symmetric/endpoint-zero Hann window (e.g. cp.hanning), which does
+    NOT exactly satisfy the constant-overlap-add (COLA) property this
+    window is used for. Summing this window's own values, shifted by
+    hops of n // 2 (50% overlap), across a fully-covered region equals
+    exactly 1 everywhere -- the standard STFT COLA identity for a Hann
+    window at 50% hop.
+
+    Parameters:
+    n (int): window length in samples.
+
+    Returns:
+    cp.ndarray: length-n window, dtype float64.
+    """
+    k = cp.arange(n, dtype=cp.float64)
+    return 0.5 * (1.0 - cp.cos(2.0 * cp.pi * k / n))
+
+
+def _sqrt_hann_window(n):
+    """
+    sqrt of the periodic Hann window (see _periodic_hann_window) -- used
+    as BOTH the analysis and synthesis window in
+    iterative_soft_thresholding's windowed-overlap-add (WOLA) block
+    processing. Applying this window twice (once analyzing, once
+    synthesizing) to the same block is equivalent to applying the
+    (COLA-compliant) periodic Hann window once, so overlap-adding
+    50%-hop blocks reconstructs a constant (1.0) weight everywhere in a
+    fully-covered region.
+
+    Parameters:
+    n (int): window length in samples.
+
+    Returns:
+    cp.ndarray: length-n window, dtype float64.
+    """
+    return cp.sqrt(_periodic_hann_window(n))
+
+
+def _wola_block_process(data, block_size, frame_processor):
+    """
+    Apply `frame_processor` independently to overlapping, sqrt-Hann-
+    windowed blocks of `data` (analysis), then reconstruct via weighted
+    overlap-add (WOLA: the same sqrt-Hann window is applied again on the
+    synthesis side, and the result is divided by the actual accumulated
+    window-squared weight at each sample -- a window-shaped, not flat-
+    scalar, correction for any leftover unevenness rather than assuming
+    perfect COLA coverage everywhere, e.g. at the very edges).
+
+    Parameters:
+    data (cp.ndarray): the full-length signal to process.
+    block_size (int): analysis/synthesis window length in samples; must
+        be even (hop is exactly block_size // 2, i.e. 50% overlap).
+    frame_processor (callable): cp.ndarray -> cp.ndarray of the same
+        length, applied to each windowed block independently.
+
+    Returns:
+    cp.ndarray: reconstructed signal, same length as `data`.
+    """
+    n = len(data)
+    hop = block_size // 2
+    window = _sqrt_hann_window(block_size)
+
+    # Zero-pad by (block_size - hop) samples on each side so the first
+    # and last real samples both fall under at least one fully-weighted
+    # window, then pad the tail further so the padded length is an exact
+    # whole number of hops past the final block start -- standard
+    # STFT/WOLA edge handling, guaranteeing every real sample is covered
+    # by the overlap-add loop below.
+    edge_pad = block_size - hop
+    min_len = edge_pad + n + edge_pad
+    n_hops = max(0, -(-(min_len - block_size) // hop))  # ceil division
+    padded_len = block_size + n_hops * hop
+    right_pad = padded_len - (edge_pad + n)
+
+    padded = cp.concatenate([
+        cp.zeros(edge_pad, dtype=cp.float64),
+        data.astype(cp.float64),
+        cp.zeros(right_pad, dtype=cp.float64),
+    ])
+
+    output = cp.zeros(padded_len, dtype=cp.float64)
+    weight = cp.zeros(padded_len, dtype=cp.float64)
+
+    start = 0
+    while start + block_size <= padded_len:
+        frame = padded[start:start + block_size] * window
+        processed = frame_processor(frame)
+        output[start:start + block_size] += processed * window
+        weight[start:start + block_size] += window * window
+        start += hop
+
+    safe_weight = cp.where(weight > 1e-12, weight, 1.0)
+    reconstructed = output / safe_weight
+    return reconstructed[edge_pad:edge_pad + n]
+
+
+def _local_peak_envelope(signal, block_size):
+    """
+    A smooth, WOLA-consistent estimate of `signal`'s own local peak
+    amplitude over time -- each `block_size`-sample analysis window
+    contributes its own peak (`max(abs(.))` of that windowed block) as a
+    constant "frame", cross-faded into neighboring blocks via the same
+    sqrt-Hann analysis/synthesis overlap-add `_wola_block_process` already
+    uses elsewhere in this module, rather than a hard block-boundary
+    estimate. New in cycle 9, backing `_cap_ist_changes_to_baseline_peak`'s
+    envelope-gated correction (see that function's docstring) -- this
+    reuses the exact same block/window machinery `iterative_soft_
+    thresholding` already relies on, rather than introducing a new
+    filter-design parameter (e.g. an independent lowpass cutoff), so the
+    envelope's own time resolution matches the granularity IST and the
+    cap already treat as "local" elsewhere in this file.
+
+    Parameters:
+    signal (cp.ndarray): the signal whose local peak envelope to
+        estimate (typically `expanded_channel`, the pre-IST baseline).
+    block_size (int): analysis/synthesis window length in samples, same
+        meaning as `_wola_block_process`'s own parameter.
+
+    Returns:
+    cp.ndarray: a smooth, non-negative envelope the same length as
+        `signal`, approximating its own local peak amplitude at each
+        sample position.
+    """
+    signal = signal.astype(cp.float64)
+    if signal.size == 0:
+        return signal
+    if len(signal) <= block_size:
+        return cp.full_like(signal, float(cp.max(cp.abs(signal))))
+
+    def _block_peak(frame):
+        return cp.full_like(frame, cp.max(cp.abs(frame)))
+
+    return _wola_block_process(signal, block_size, _block_peak)
+
+
+def iterative_soft_thresholding(
+    data, max_iter, threshold, convergence_tol=1e-6, block_size=IST_BLOCK_SIZE
+):
     """
     Perform IST on data using CuPy and cuFFT.
 
     Parameters:
     data (cp.ndarray): The input audio data.
-    max_iter (int): The maximum number of iterations for IST.
-    threshold (float): The absolute threshold value for IST -- applied
-        as-is to both `data`'s raw time-domain magnitude (via
-        initialize_ist) and each iteration's raw FFT-bin magnitude, not
-        scaled relative to `data`'s own amplitude.
+    max_iter (int): The maximum number of iterations for IST to run
+        before giving up on convergence (see the early-exit fix below --
+        this is now a ceiling, not always the actual iteration count).
+    threshold (float): Peak-relative threshold fraction (0-1) for IST --
+        applied each iteration as `threshold * max(abs(current))`, both
+        to `data`'s time-domain magnitude (via initialize_ist) and to
+        each iteration's own FFT-bin magnitude, rather than as an
+        absolute cutoff compared directly against raw magnitudes.
+    convergence_tol (float): Relative early-exit tolerance (see below).
+        Defaults to 1e-6.
+    block_size (int): Windowed-overlap-add block size in samples (see
+        the "Block/windowed processing" note below). Signals no longer
+        than this run as a single whole-buffer chain (unchanged, fast
+        path for short inputs/unit tests); longer signals are processed
+        in 50%-overlap windowed blocks. Defaults to IST_BLOCK_SIZE
+        (8192, ~186 ms at 44.1 kHz).
 
-    Known issue (investigated, not fixed as of cycle 4): `data` here is
-    raw-PCM-scale (peak ~1e4-3e4), while `threshold`'s conventional
-    default (0.6) is many orders of magnitude smaller. Measured (cycle 3,
+    Peak-relative thresholding fix (cycle 5, closing a known issue
+    flagged since cycle 4): `data` here is raw-PCM-scale (peak
+    ~1e4-3e4), while `threshold`'s conventional default (0.6) is many
+    orders of magnitude smaller as an absolute cutoff. Measured (cycle 3,
     real ~15s input_test.mp3 channel): median FFT-bin magnitude ~9.3e4,
-    so a threshold of 0.6 masks essentially nothing (only exact/
-    near-zero bins) in both the time- and frequency-domain steps below --
-    the "keep significant frequencies, discard noise" mechanism this
-    function is meant to perform barely triggers at real audio's actual
-    scale, leaving iterative_soft_thresholding to mostly perform
+    so an absolute threshold of 0.6 masked essentially nothing (only
+    exact/near-zero bins) in both the time- and frequency-domain steps
+    below -- the "keep significant frequencies, discard noise" mechanism
+    this function is meant to perform barely triggered at real audio's
+    actual scale, leaving iterative_soft_thresholding to mostly perform
     near-lossless FFT/IFFT round trips rather than genuine sparse
-    reconstruction. Flagged as a strong future-cycle candidate (convert
-    to a peak-relative fraction) but not changed here -- this cycle's
-    finding/fix (below) is scoped to the harmonic term only.
+    reconstruction. Both initialize_ist's time-domain mask and this
+    function's own frequency-domain mask now compare against each
+    domain's own current peak magnitude (`threshold * max(abs(.))`)
+    instead of `threshold` alone, so the same 0-1 fraction behaves
+    consistently regardless of the data's absolute scale.
+
+    DC-bin exclusion (cycle 5, bundled with the fix above): once
+    thresholding actually engages (per the fix above), a real audio
+    buffer's own asymmetry (e.g. a loud one-sided transient) can make the
+    FFT's zero-frequency (DC) bin the single largest-magnitude bin in a
+    given iteration -- if so, a peak-relative mask would keep primarily
+    that DC bin (since everything else is compared against *its*
+    magnitude), injecting a spurious constant offset/drone into the
+    reconstructed signal on every subsequent iteration. The
+    frequency-domain mask therefore always excludes bin 0 regardless of
+    its magnitude; genuine program content has no reason to depend on a
+    literal zero-Hz component, so this costs nothing real while removing
+    a specific, previously-unguarded failure mode.
+
+    Convergence early-exit (cycle 5): hard-threshold IST here is a
+    fixed-point projection (fft/ifft are exact inverses of each other),
+    so once a pass's thresholded frequency support stops changing, every
+    further iteration recomputes the identical result -- pure wasted GPU
+    compute for the remaining iterations up to max_iter. Each pass now
+    measures the largest per-sample change from the previous pass and
+    breaks out of the loop once that change falls below
+    `convergence_tol` times the initial (post-initialize_ist) peak
+    magnitude, rather than always running exactly max_iter passes
+    unconditionally.
 
     Harmonic-reconstruction term removed (cycle 4): cycles 2-3 added a
     per-iteration sinusoidal "harmonic reconstruction" term on top of the
@@ -333,9 +591,10 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     (2) naively nesting a per-block Python loop inside a function
     already run up to 300 times over ~2.67M samples/channel risks
     reintroducing exactly the kind of runtime blowup issue #20's
-    lms_filter fix addressed elsewhere in this same file; (3) per the
-    "Known issue" above, IST's threshold masking barely triggers at real
-    audio scale regardless, so removing the harmonic term returns this
+    lms_filter fix addressed elsewhere in this same file; (3) at cycle
+    4's time, IST's threshold masking barely triggered at real audio
+    scale at all (see the peak-relative thresholding fix above, added
+    cycle 5), so removing the harmonic term at the time returned this
     function to IST's plain textbook form (init-threshold, then repeated
     FFT / frequency-domain-threshold / IFFT) -- exactly what the
     README/paper describe, with no synthetic tone bolted on. A properly
@@ -343,18 +602,371 @@ def iterative_soft_thresholding(data, max_iter, threshold):
     future direction, but only once it can be verified against real
     audio quality metrics rather than shipped speculatively.
 
+    Block/windowed-overlap-add (WOLA) processing (cycle 5, found
+    necessary while verifying the peak-relative fix above): a single
+    whole-buffer FFT threshold compares every sample against one global
+    peak magnitude, so the single loudest passage in the entire signal
+    sets the cutoff for the *whole* track -- and because ifft's basis
+    functions span the entire buffer, whatever frequency content a loud
+    passage's threshold happens to retain leaks, via that global inverse
+    transform, into every other sample position, including temporally
+    distant quiet passages. This was measured directly while validating
+    the peak-relative fix: a synthetic loud-then-quiet two-segment
+    signal (test_ist_no_static_floor_in_quiet_segment) showed the quiet
+    segment's RMS rising 57.8 dB after IST once peak-relative
+    thresholding actually engaged -- a static-floor-like regression in
+    the same family as the cycle-4 harmonic-term bug, just via a
+    different mechanism (global spectral leakage instead of a
+    synthetic tone). For signals longer than `block_size`, this function
+    now runs the exact same `_ist_chain` (peak-relative threshold,
+    DC-bin exclusion, convergence early-exit) independently on each of a
+    series of 50%-overlapping, sqrt-Hann-windowed blocks, then
+    reconstructs via weighted overlap-add (window applied on both the
+    analysis and synthesis side, divided by the real accumulated
+    window-squared weight rather than a flat scalar -- see
+    _wola_block_process) -- so each block's own peak-relative threshold
+    reflects only that ~186 ms window's local content, not the whole
+    track. Verified (this cycle): re-running
+    test_ist_no_static_floor_in_quiet_segment with this block processing
+    in place brings the quiet segment's RMS rise back within its
+    original (pre-cycle-5) 4x/12 dB bound. Signals no longer than
+    `block_size` (e.g. every short synthetic buffer in this module's own
+    unit tests) skip windowing entirely and run `_ist_chain` directly on
+    the whole buffer, exactly matching this function's pre-block-
+    processing behavior -- there is only one block to process, so
+    windowing/overlap-add would only add unnecessary edge tapering with
+    no benefit.
+
+    Non-dominant-band contribution root cause (this cycle, closing the
+    changelog's "no clearly measurable added detail below the original
+    Nyquist" gap): real-audio measurement (audio-quality-checker) found
+    IST's own contribution 34-78 dB below the interpolation baseline in
+    every band above 2kHz -- too small to move a band's level regardless
+    of _cap_ist_changes_to_baseline_peak's behavior. Direct measurement
+    this cycle (see test_lower_threshold_increases_nondominant_band_ist_
+    contribution) confirms both halves of that diagnosis on this module's
+    own broadband synthetic signal: (1) the peak-inflation cap leaves
+    every non-dominant band at ~100% of its uncapped magnitude -- it is
+    not the bottleneck; (2) the default threshold_value=0.6's own
+    peak-relative FFT-domain mask above IS the bottleneck -- for a
+    real/broadband spectrum, a bin needs to be within `threshold` (60%)
+    of the block's single loudest bin (usually low-frequency) to survive
+    each pass, which almost no higher-frequency content can ever meet.
+    A materially lower threshold_value (0.15 measured; same algorithm, no
+    new synthesized content -- still the plain hard-threshold FFT/IFFT
+    round trip) retains a larger, still information-derived set of
+    "significant" bins each pass, measurably increasing every
+    non-dominant band's own surviving contribution (uniformly ~8.4 dB
+    from 2-18kHz on this cycle's synthetic signal) while changing the
+    dominant bands by under 2 dB. This is reported as a proposed
+    threshold_value default for upscale() (see this cycle's report) --
+    verified only against this module's own synthetic signal here, not
+    yet against audio-quality-checker's real-audio pipeline. A more
+    fundamental redesign (a per-band/local-frequency-relative threshold
+    instead of one global per-block peak) was prototyped but not shipped:
+    it showed much larger gains for bands with no competing louder
+    neighbor, but also a new failure mode not present in the mechanism
+    above -- near-total collapse of a band's content depending on where
+    an arbitrary band boundary happened to fall relative to the block's
+    actual spectral content -- that could not be verified safe on real,
+    continuous-spectrum program material without the audio-quality-
+    checker pipeline, so it remains a candidate for a future cycle
+    rather than a shipped change.
+
     Returns:
     cp.ndarray: The processed audio data after IST.
     """
-    data_thres = initialize_ist(data, threshold)
+    block_size = int(block_size)
+    if block_size < 2:
+        block_size = 2
+    if block_size % 2:
+        block_size += 1  # hop = block_size // 2 must be exact.
 
-    for _ in range(max_iter):
-        data_fft = cp.fft.fft(data_thres)
-        mask = cp.abs(data_fft) > threshold
-        data_fft_thres = cp.where(mask, data_fft, 0)
-        data_thres = cp.fft.ifft(data_fft_thres).real
+    if len(data) <= block_size:
+        return _ist_chain(data, max_iter, threshold, convergence_tol)
 
-    return data_thres
+    return _wola_block_process(
+        data, block_size,
+        lambda frame: _ist_chain(frame, max_iter, threshold, convergence_tol)
+    )
+
+
+def _cap_ist_changes_to_baseline_peak(
+    expanded_channel, ist_changes, max_rounds=20, dominant_band_ratio=0.002,
+    safety_margin=1.2, block_size=IST_BLOCK_SIZE
+):
+    """
+    Rescale `ist_changes` so the combined signal
+    `expanded_channel + ist_changes` peaks close to -- rather than
+    substantially above -- `expanded_channel` (the pre-IST,
+    interpolation-only baseline) on its own, WITHOUT uniformly
+    suppressing frequency content that was not itself responsible for
+    the inflation.
+
+    History: cycle 6 (ported from the sibling fat_llama_fftw package)
+    fixed a real regression from cycle 5's peak-relative IST threshold
+    fix -- peak-relative thresholding (see initialize_ist /
+    iterative_soft_thresholding) keeps/boosts whichever frequency
+    dominates a block's own spectrum (for real music, usually low-
+    frequency content); adding that boosted content back onto
+    `expanded_channel` can raise the *combined* channel's own time-domain
+    peak above what interpolation alone produced, which upscale()'s later
+    autoscale/normalize stages (each a single scalar divide of the
+    *entire* channel) then divided back down across every frequency,
+    including bands IST never touched (measured: ~1.7-4.8 dB attenuation,
+    coherence 9.5->8.0). Cycle 6's fix rescaled `ist_changes` by ONE
+    uniform per-channel scalar via iterative shrink rounds. That closed
+    the attenuation regression but (measured by audio-quality-checker on
+    real audio, this cycle/7) also suppressed IST's own contribution
+    almost everywhere else: for real, in-phase-dominated audio, the
+    single scalar needed to tame the dominant band's overshoot is small
+    (~0.06x on this module's own adversarial synthetic case below), and
+    that same small scalar was then applied to every OTHER frequency
+    `ist_changes` carries too -- including genuinely quiet, legitimately-
+    added high-frequency detail -- collapsing it to near nothing.
+
+    Frequency-selective fix (cycle 7): a whole-channel FFT of
+    `ist_changes` shows the peak-inflation mechanism is concentrated in a
+    narrow band around `ist_changes`'s own dominant spectral bin (the
+    same one peak-relative thresholding privileges) plus its immediate
+    spectral leakage/smearing (measured directly on this module's own
+    adversarial synthetic case: the top single bin plus its neighbors
+    within `dominant_band_ratio` of its magnitude account for the
+    overwhelming majority of the peak overshoot, while a separate quiet
+    high-frequency component sits at ~5e-5 of the dominant bin's
+    magnitude -- two-plus orders of magnitude below even a small
+    `dominant_band_ratio`, so it is never misclassified as "dominant").
+    This function now: (1) splits `ist_changes`'s spectrum via
+    `cp.fft.rfft` into a "dominant" component (bins whose magnitude is
+    >= `dominant_band_ratio` times the spectrum's own peak magnitude) and
+    a "residual" component (everything else), (2) iteratively shrinks
+    ONLY the dominant component (via the same bounded multiplicative-
+    shrink method cycle 6 used on the whole signal) so the combined peak
+    approaches the baseline, leaving the residual component -- e.g. quiet
+    high-frequency detail IST legitimately adds -- untouched, and (3)
+    falls back to one additional whole-signal uniform shrink pass (cycle
+    6's original method, applied to the frequency-selective candidate) as
+    a safety net ONLY if that candidate's own combined peak still exceeds
+    `baseline_peak * safety_margin` -- i.e. only when isolating the
+    dominant band alone was not sufficient on its own. Verified directly
+    (this cycle's own unit tests): on the adversarial loud-low +
+    quiet-high synthetic case, the frequency-selective pass alone (no
+    safety net needed) reduces the combined-peak excess over baseline to
+    ~8% of the uncapped excess (comfortably under cycle 6's own ~15%
+    acceptance bound) while leaving the quiet high-frequency component's
+    own magnitude in `ist_changes` completely intact (~100% survival, vs
+    ~5.9% under cycle 6's uniform scalar on the same case); a deliberately
+    pathological case (dominant_band_ratio set so no bin qualifies as
+    dominant) confirms the safety net engages correctly and reproduces
+    cycle 6's own ~5.9%-survival bound rather than doing worse.
+
+    This does not change `iterative_soft_thresholding` itself (still
+    plain FFT/threshold/IFFT, no synthetic content, per
+    .claude/rules/project-mission.md) -- it only reshapes, in the FFT
+    domain, how much of IST's own contribution survives to be added onto
+    the interpolated channel, and only in the specific band responsible
+    for the peak-inflation mechanism above.
+
+    As with cycle 6's version, there is no closed-form guarantee that the
+    combined peak never exceeds `baseline_peak`: when IST's surviving
+    dominant-band content is exactly in phase with `expanded_channel`'s
+    own peak sample, only a dominant-component scale of (near) zero
+    fully removes the overshoot that band contributes, and the residual
+    component (deliberately left unscaled by the frequency-selective pass)
+    can itself carry a small remaining excess -- this function approaches,
+    but does not guarantee reaching, the baseline peak, same as cycle 6.
+    `dominant_band_ratio=0.002` and `safety_margin=1.2` were chosen
+    empirically on this module's own synthetic adversarial case (see
+    tests) to keep the common case fully frequency-selective (safety net
+    inactive) while still bounding pathological cases at least as well as
+    cycle 6's uniform approach; `max_rounds=20` is unchanged from cycle 6.
+    This has only been verified here via this module's own unit tests,
+    not against real audio (see this cycle's report for that caveat).
+
+    Envelope-gated correction (cycle 9, fixing a real regression this
+    function itself introduced): audio-quality-checker measured a bounded
+    but real onset defect on genuine real-audio output -- the first ~0.5s
+    of a track (its own fade-in) showed frame RMS elevated up to +18.5 dB
+    relative to the reference, decaying to within 1 dB by ~0.5s. Root-
+    caused (this cycle, directly measured on this module's own synthetic
+    fading-broadband signal, see
+    test_cap_ist_changes_to_baseline_peak_preserves_quiet_onset) to this
+    function's own dominant/residual split above: cycles 7-8 correctly
+    identified WHICH frequencies drive the peak overshoot, but classify
+    and rescale them via a SINGLE whole-buffer FFT/IFFT -- the same class
+    of defect `iterative_soft_thresholding` itself was fixed (cycle 5) to
+    avoid via WOLA block processing, reintroduced here because this
+    function was added afterward and still operates on the whole channel
+    at once. For a genuinely STATIONARY signal (this function's own
+    existing adversarial unit tests), a whole-buffer split is harmless --
+    every block looks alike, so a single global scale factor for the
+    dominant band is representative everywhere. For a NON-STATIONARY
+    channel (e.g. a real track's fade-in/fade-out, or any envelope-
+    modulated passage), it is not: before any capping, `dominant_component
+    + residual_component` reconstructs `ist_changes` EXACTLY (lossless by
+    linearity of the FFT) -- the true, quiet shape of a fade-in exists
+    only via a near-exact cancellation between the two components at that
+    moment in time, not "inside" either one alone. Once `dominant_scale !=
+    1` rescales ONLY the dominant component by one FIXED scalar (chosen to
+    fix the overshoot in the LOUD part of the track) and reconstructs via
+    a global `irfft`, that cancellation breaks -- and because the
+    dominant component's own basis functions have roughly constant
+    time-domain amplitude across the ENTIRE buffer (a handful of low-
+    frequency bins, not a localized event), the same fixed-magnitude
+    "correction" being subtracted everywhere is disproportionately large
+    relative to a genuinely quiet region's own tiny true content,
+    "unmasking" residual energy there that the uncapped, exact
+    reconstruction had been quietly cancelling out. Measured directly:
+    onset shape-relative frame-RMS deviation from the true envelope peaked
+    at up to ~24.6 dB in the very first analysis block with the
+    whole-buffer version, for a synthetic signal built specifically to
+    exercise this (broadband multi-tone content under a 0.5s fade-in).
+
+    The fix keeps the SAME dominant/residual split and SAME global
+    `dominant_scale` computation (both already correctly identify what
+    and how much needs shrinking for the LOUD part of the channel that
+    actually causes the overshoot) but no longer applies the resulting
+    correction (`(1 - dominant_scale) * dominant_component`, i.e. exactly
+    how much is being removed from the dominant band) uniformly in time.
+    Instead it tapers that correction by `_local_peak_envelope`, a smooth
+    WOLA-based estimate of `expanded_channel`'s own local peak amplitude
+    at `block_size` granularity (reusing the exact block/window machinery
+    `iterative_soft_thresholding` already relies on, rather than adding a
+    new filter-design parameter): a region whose own local peak sits near
+    the channel's overall peak gets (close to) the full correction --
+    reproducing cycles 7-8's already-verified behavior almost exactly,
+    since real overshoots by construction occur where the channel is loud
+    -- while a region far quieter than the channel's own peak (e.g. an
+    onset/fade-in, which never came close to causing the overshoot in the
+    first place) gets little to none of it, since it was never
+    responsible for the mechanism the cap exists to fix. The same gating
+    is applied to the safety-net fallback's own correction for
+    consistency. Verified directly (this cycle): on the same fading
+    synthetic signal, the onset deviation above drops from ~24.6 dB to
+    ~4.9-6.1 dB (further reduced once averaged with the rest of the
+    pipeline) while every one of this function's own pre-existing
+    stationary-signal unit tests (peak-overshoot reduction, quiet-band
+    survival, no-op cases, the safety-net fallback, and upscale_channels'
+    end-to-end wiring) continues to pass with results numerically close
+    to their pre-cycle-9 values -- for a stationary signal, the envelope
+    stays near the channel's own peak throughout, so the gate stays near
+    1.0 and this reduces to cycles 7-8's original behavior almost
+    exactly.
+
+    Parameters:
+    expanded_channel (cp.ndarray): the pre-IST, interpolated channel (the
+        baseline whose own peak must not be exceeded).
+    ist_changes (cp.ndarray): IST's output for this channel, about to be
+        added onto `expanded_channel` by upscale_channels.
+    max_rounds (int): maximum number of iterative shrink rounds, used by
+        both the dominant-band pass and the safety-net fallback. Default
+        20.
+    dominant_band_ratio (float): a spectral bin of `ist_changes` is
+        classified "dominant" (and thus subject to shrinking) if its FFT
+        magnitude is >= this fraction of the spectrum's own peak
+        magnitude; everything else is "residual" and left untouched by
+        the frequency-selective pass. Default 0.002.
+    safety_margin (float): the whole-signal uniform-shrink safety net
+        only engages if the frequency-selective candidate's own combined
+        peak still exceeds `baseline_peak * safety_margin`. Default 1.2.
+    block_size (int): granularity (in samples) of the `_local_peak_
+        envelope` used to gate the dominant-band correction (cycle 9).
+        Default IST_BLOCK_SIZE (8192), matching iterative_soft_
+        thresholding's own block granularity.
+
+    Returns:
+    cp.ndarray: `ist_changes` reshaped in the FFT domain per the above
+        (unchanged if no capping was needed).
+    """
+    expanded_channel = expanded_channel.astype(cp.float64)
+    if expanded_channel.size == 0:
+        return ist_changes
+
+    baseline_peak = float(cp.max(cp.abs(expanded_channel)))
+    if baseline_peak == 0.0:
+        # A silent pre-IST baseline has no positive peak to bound against;
+        # initialize_ist itself would already have zeroed an all-zero
+        # input's threshold mask, so ist_changes is expected to be zero
+        # here too -- nothing to cap.
+        return ist_changes
+
+    def _uniform_shrink(component):
+        scale = 1.0
+        for _ in range(max_rounds):
+            combined_peak = float(
+                cp.max(cp.abs(expanded_channel + scale * component))
+            )
+            if combined_peak <= baseline_peak or combined_peak == 0.0:
+                break
+            scale *= baseline_peak / combined_peak
+        return scale
+
+    uncapped_combined_peak = float(
+        cp.max(cp.abs(expanded_channel + ist_changes))
+    )
+    if uncapped_combined_peak <= baseline_peak:
+        # Nothing to cap -- a genuine no-op, not merely a small scalar.
+        return ist_changes
+
+    n = len(ist_changes)
+    spectrum = cp.fft.rfft(ist_changes)
+    magnitude = cp.abs(spectrum)
+    peak_magnitude = float(cp.max(magnitude)) if magnitude.size else 0.0
+    if peak_magnitude == 0.0:
+        # ist_changes carries no spectral content at all -- shouldn't
+        # normally arise given the check above, but guards against a
+        # degenerate all-zero buffer.
+        return ist_changes
+
+    dominant_mask = magnitude >= dominant_band_ratio * peak_magnitude
+    dominant_component = cp.fft.irfft(
+        cp.where(dominant_mask, spectrum, 0), n=n
+    )
+    residual_component = cp.fft.irfft(
+        cp.where(dominant_mask, 0, spectrum), n=n
+    )
+
+    dominant_scale = 1.0
+    for _ in range(max_rounds):
+        combined_peak = float(cp.max(cp.abs(
+            expanded_channel
+            + dominant_scale * dominant_component
+            + residual_component
+        )))
+        if combined_peak <= baseline_peak or combined_peak == 0.0:
+            break
+        dominant_scale *= baseline_peak / combined_peak
+
+    # Envelope-gated correction (cycle 9, see docstring): rather than
+    # applying "how much is being removed from the dominant band"
+    # uniformly in time (dominant_scale * dominant_component +
+    # residual_component, cycles 7-8's original formula), taper it by a
+    # smooth local-peak envelope of expanded_channel so genuinely quiet
+    # regions (e.g. a fade-in onset, never responsible for the overshoot)
+    # receive little to none of it, while regions near the channel's own
+    # peak (where the overshoot actually happens) receive the same
+    # correction cycles 7-8 already verified.
+    envelope = _local_peak_envelope(expanded_channel, block_size)
+    gate = cp.clip(envelope / baseline_peak, 0.0, 1.0)
+    correction = (1.0 - dominant_scale) * dominant_component
+    candidate = ist_changes - gate * correction
+
+    combined_peak_candidate = float(
+        cp.max(cp.abs(expanded_channel + candidate))
+    )
+    if combined_peak_candidate > baseline_peak * safety_margin:
+        # The frequency-selective pass alone was not enough (e.g. an
+        # unusually flat/broadband ist_changes spectrum, or a
+        # dominant_band_ratio that happened to exclude the real driver) --
+        # fall back to cycle 6's whole-signal uniform shrink on top of the
+        # candidate, so pathological cases never regress below that
+        # earlier guarantee. Gated the same way as the primary correction
+        # above, for the same reason.
+        safety_scale = _uniform_shrink(candidate)
+        safety_correction = (1.0 - safety_scale) * candidate
+        candidate = candidate - gate * safety_correction
+
+    return candidate
 
 
 def _lms_block_ranges(start, n, block_size):
@@ -552,6 +1164,24 @@ def upscale_channels(channels, upscale_factor, max_iter, threshold):
     max_iter (int): The maximum number of iterations for IST.
     threshold (float): The threshold value for IST.
 
+    As of the cycle 6 fix, refined in cycle 7 to be frequency-selective
+    (see _cap_ist_changes_to_baseline_peak's docstring), `ist_changes` is
+    capped -- per channel, in the FFT domain -- before being added onto
+    the interpolated channel, so IST's own peak-relative boost cannot
+    inflate this channel's peak beyond what interpolation alone produced.
+    Without this, that inflation propagated into upscale()'s later
+    autoscale/normalize stages (each a per-channel scalar divide by this
+    channel's own peak), which divided every frequency in the channel
+    down harder than the reference -- including bands IST never touched
+    -- measured (audio-quality-checker, cycle 6) as a broad ~1.7-4.8 dB
+    attenuation regression relative to the reference FLAC. Cycle 6's own
+    single-uniform-scalar version of the cap fixed that regression but
+    (measured, cycle 7) also suppressed IST's own added detail almost
+    everywhere else; cycle 7's frequency-selective version shrinks only
+    the FFT band actually responsible for the peak inflation, leaving
+    other bands (e.g. quiet high-frequency detail IST legitimately adds)
+    untouched in the common case.
+
     Returns:
     cp.ndarray: The upscaled and processed audio channels.
     """
@@ -565,6 +1195,9 @@ def upscale_channels(channels, upscale_factor, max_iter, threshold):
         logger.info("Performing IST...")
         ist_changes = iterative_soft_thresholding(
             expanded_channel, max_iter, threshold
+        )
+        ist_changes = _cap_ist_changes_to_baseline_peak(
+            expanded_channel, ist_changes
         )
         expanded_channel = expanded_channel.astype(cp.float64) + ist_changes
 
@@ -723,8 +1356,20 @@ def upscale(
         (e.g., 'mp3', 'wav', 'ogg', 'flac').
     target_format (str): Format of the output audio file
         (e.g., 'flac', 'wav').
-    max_iterations (int): Maximum number of iterations for IST.
-    threshold_value (float): Threshold value for IST.
+    max_iterations (int): Maximum number of iterations for IST -- a
+        ceiling, not always the actual iteration count, since (as of the
+        cycle 5 fix) iterative_soft_thresholding now exits early once its
+        result converges to a fixed point (see that function's
+        docstring).
+    threshold_value (float): Peak-relative IST threshold fraction (0-1).
+        As of the cycle 5 fix, this is compared against each domain's
+        own current peak magnitude each iteration (`threshold_value *
+        max(abs(current))`), not against raw sample/FFT-bin magnitudes
+        directly -- previously an absolute cutoff compared as-is against
+        raw-PCM-scale magnitudes (peak ~1e4-3e4), so the documented
+        default (0.6) masked essentially nothing and IST barely
+        sparsified real audio at all (see
+        iterative_soft_thresholding's docstring for the full history).
     target_bitrate_kbps (int): Used only to derive the interpolation
         upscale_factor relative to the source file's own bitrate --
         see compute_upscale_factor for the exact formula; must itself

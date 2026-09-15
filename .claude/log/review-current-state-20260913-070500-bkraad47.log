@@ -1,0 +1,10 @@
+### [07:05:00 UTC] Step 1-3 — re-read changed files
+Input: candidate C_3 (post cycle-3 fix, tag v-2.0.0/iter-3).
+Action: Re-read the rewritten _cap_ist_changes_to_baseline_peak (frequency-selective, dominant/residual FFT split with safety-net fallback) in fat_llama/audio_fattener/feed.py, and confirmed fat_llama/tests/test_feed.py's updated/new tests via generate-code's own report.
+Output: _cap_ist_changes_to_baseline_peak signature grew (dominant_band_ratio=0.002, safety_margin=1.2 params); internal mechanism changed from uniform scalar to dominant/residual FFT-domain split.
+
+### [07:05:20 UTC] Step 4-6 — update docs/CURRENT_STATE.md
+Action: Rewrote _cap_ist_changes_to_baseline_peak's factblock in place; updated TestAudioFattener's class summary with cycle 7's test changes.
+Output: docs/CURRENT_STATE.md updated (18 feed.py factblocks, no count change -- one function's signature/behavior updated).
+
+### [07:05:25 UTC] DONE — docs/CURRENT_STATE.md refreshed against candidate C_3 (cycle 3 fix applied).

@@ -1,0 +1,37 @@
+# audio-quality-checker run 20260913-073117 (bkraad47)
+
+### [07:31:17 UTC] Step 0 — Setup
+Input: dispatch prompt with proposed_upscale_params (threshold_value=0.15, target_bitrate_kbps=1411, rest baseline); no branch/commit SHA supplied.
+Action: read .claude/agents/rules/audio-quality.md and .claude/rules/scope-and-safety.md in full; captured UTC time, git user (bkraad47), branch v-2.0.0, HEAD 8641dcaed7006158635f9627e7be214a15ac9247, `git status --porcelain`; checked CUDA availability.
+Reasoning: rules require a log file opened before step 1 and a remote-vs-local decision based on dispatch inputs and working-tree cleanliness.
+Output: log opened. Working tree has uncommitted changes beyond my permitted set (M docs/CURRENT_STATE.md, ?? docs/images/scorereport.pdf, ?? pytest_output.txt) and no branch/commit was supplied in the dispatch prompt -> per rules step 1a, remote GPU path is NOT eligible; will use local GPU fallback. CUDA available: 1 device, NVIDIA GeForce RTX 4050 Laptop GPU.
+
+### [07:36:00 UTC] Step 1 — read_audio/write_audio on synthesized sample
+Input: pydub Sine(440), 1000 ms, exported to mp3 in the scratchpad; feed.read_audio / feed.write_audio.
+Action: ran scratchpad/rw_check.py: read the mp3 back via read_audio, wrote FLAC via write_audio (default normalize), wrote WAV via write_audio(normalize=False, reference_amplitude=32768), inspected with soundfile + mutagen.
+Reasoning: rules "What to check" step 1 requires exercising both functions on a synthesized sample and inspecting bitrate/sample rate/channels/duration of the result.
+Output: READ sr=44100, n=44100, source bitrate=63999 bps, channels=1, samples.ndim=1, dur=1000 ms, dominant 440.00 Hz, finite, peak 31212. FLAC: format=FLAC subtype=PCM_24 (mutagen bits_per_sample=24), sr=44100 (preserved), ch=1 (preserved), duration 1.0000 s (delta 0.000000 s vs input), real bitrate 459.9 kbps, peak 1.0, clipped fraction 4.5e-05, corr with normalized input = 1.00000000, dominant 440.00 Hz. WAV: subtype=DOUBLE, bit-exact round trip (max err 0), peak 0.9525. PASS on all four properties.
+
+### [07:36:30 UTC] Step 2 — test_feed.py coherence review
+Input: fat_llama/tests/test_feed.py (2091 lines, 20 tests).
+Action: read the file in full; assessed each test for whether its assertions check audio content vs mere file existence; also read upscale()'s stage ordering in feed.py to judge coverage gaps.
+Reasoning: rules "What to check" step 2 -- flag tests that assert only existence/non-emptiness.
+Output: no incoherent test found; every end-to-end test asserts finiteness, non-silence, clip fraction, duration, sample rate and dominant-frequency preservation, and unit tests assert measured spectral/level properties with sanity checks against vacuous passes. No assertion edits made. Two coverage gaps to report (not fix): (a) no test covers stereo input through read_audio/upscale (fixture is mono only) though upscale() has a distinct 2-channel reshape path; (b) test_upscale_end_to_end_with_adaptive_filter_enabled does not assert the above-original-Nyquist guarantee, and the LMS stage is the only stage that runs after normalize and before the cutoff.
+
+### [07:44:00 UTC] Step 3 — Produce output_test.flac (remote-first, local fallback)
+Input: proposed_upscale_params from the dispatch (source='proposed'): input_test.mp3 -> output_test.flac, mp3->flac, max_iterations=300, threshold_value=0.15, target_bitrate_kbps=1411, normalize/autoscale/adaptive_filter all True.
+Action: remote path skipped per rules step 1a preconditions (no branch/commit supplied in dispatch; working tree dirty beyond my permitted files) -- no mcp__fllm-mcp-server__test_generate call made, so no GPU VM was billed. Ran the local GPU fallback: scratchpad/run_upscale.py as a background command (single upscale() call, unmodified proposed params).
+Reasoning: exactly one pipeline run per invocation, with the proposed config rather than the baseline, per the rules' proposed-params branch.
+Output: SUCCESS in 73.7 s (source 192 kbps mp3, upscale_factor=4, stereo, Nyquist cutoff at 22050 Hz applied last). output_test.flac: 176400 Hz, 2 ch, PCM_24, 15.1373 s (identical to reference, delta 0.000000 s), real bitrate 1900.5 kbps.
+
+### [07:46:00 UTC] Step 4 — Test suite run
+Input: fat_llama/tests/test_feed.py (pytest not installed in .venv; used unittest).
+Action: python -m unittest fat_llama.tests.test_feed -v
+Output: Ran 28 tests in 28.680s -- OK (0 failures, 0 errors, 0 skips; GPU present so no requires_gpu skips).
+
+### [07:50:00 UTC] Step 5-7 — Spectral/coherence analysis, scores, spectrogram image
+Input: input_test.flac (reference, 308700 Hz PCM_24 stereo), output_test.flac (this run), input_test.mp3 (source, 44100 Hz, 192 kbps).
+Action: scratchpad/score.py (fixed spectral-deviation algorithm + coherence checks + per-band response + noise-floor percentiles), scratchpad/detail.py (three-way per-band comparison at 44.1 kHz, spectral flatness, HF frame-energy tracking), scratchpad/dyn.py (frame-RMS dynamic range), scratchpad/ist_contrib.py (component-level diagnostic: IST contribution per band vs the interpolation baseline at threshold 0.6 vs 0.15 on the real source -- no second upscale() run), scratchpad/onset_and_image.py (onset extent + docs/images/spectrogram_comparison.png via analysis.py's read_mp3/read_flac/normalize, scipy.signal.spectrogram nperseg=2048, all panels masked at the mp3's own 22050 Hz Nyquist, shared vmin=-120/vmax=0 colorbar).
+Output: spectral_convergence=0.9758, correlation=0.9997 -> deviation_score=9.9. Coherence: clip_frac=1.16e-05, nonfinite=0, unmatched dropouts=0, diff p99.9 ratio out/ref=0.264, above-original-Nyquist peak -131.47 dB rel in-band peak (mean -171.76 dB; in-band median is -61.14 dB) -> at the FFT noise floor. Per-band out-vs-ref: -0.15 dB worst case (no cross-band attenuation regression; prior regression was 1.7-4.8 dB); out-vs-mp3 uniform -0.34 dB from 2-19 kHz. IST contribution vs interpolation baseline on real audio: 0.6 -> 0.15 gains +2.5..+14 dB only below 4 kHz; 4-22 kHz UNCHANGED at -68..-80 dB (i.e. -0.5..-1.2 dB, slightly worse). Combined channel vs interpolation baseline at 0.15: +0.29..+0.51 dB below 4 kHz, 0.000 dB above 4 kHz. Cap still works at 0.15 (uncapped 2.026x -> capped 1.050x of baseline peak). Onset artifact: first ~0.5 s of the fade-in elevated up to +18.5 dB frame RMS vs reference (absolute -51.6 dBFS vs -63.2); beyond 0.5 s mean delta +0.06 dB, max 1.10 dB. Image written to docs/images/spectrogram_comparison.png. Scores: coherence 8, spectral_deviation 9.9.
+
+### [07:52:00 UTC] DONE — Local-GPU run with the proposed params (threshold_value=0.15) scored coherence 8 / spectral_deviation 9.9; no above-Nyquist content, no cross-band attenuation regression, but the added-detail gap is NOT narrowed on real audio (IST still 68-80 dB below the interpolation baseline above 4 kHz).

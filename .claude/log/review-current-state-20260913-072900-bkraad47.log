@@ -1,0 +1,10 @@
+### [07:29:00 UTC] Step 1-3 — check for changes
+Input: candidate C_4 (post branch-cycle-4 fix, tag v-2.0.0/iter-4).
+Action: Confirmed generate-code's cycle-4 change was docstring-only (iterative_soft_thresholding, no functional/behavioral change) plus one additive test. No new functions, no signature/behavior changes to any existing factblocked entity.
+Output: Light-touch update sufficient -- no full re-read needed.
+
+### [07:29:10 UTC] Step 4-6 — update docs/CURRENT_STATE.md
+Action: Updated iterative_soft_thresholding's factblock description with the cycle-8 root-cause finding (threshold_value default is the bottleneck, not the cap); updated TestAudioFattener's class summary with the new broadband regression test.
+Output: docs/CURRENT_STATE.md updated.
+
+### [07:29:15 UTC] DONE — docs/CURRENT_STATE.md refreshed against candidate C_4 (branch cycle 4 fix applied, docs-only change).
